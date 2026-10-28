@@ -131,11 +131,6 @@ impl Model<Element> {
                     let layer_ctx =
                         compute_layer_ctx::<F>(&mut ctx_aux, &mut model_polys, id, layer)?;
                     if let Some(layer_tables) = layer_ctx.lookup_tables() {
-                        eprintln!(
-                            "DBG_REGISTER id={id} op={:?} tables={:?}",
-                            layer.describe(),
-                            layer_tables.iter().map(|t| t.name()).collect::<Vec<_>>()
-                        );
                         layer_tables
                             .into_iter()
                             .for_each(|table_type| tables.entry(table_type).or_default().push(id));
