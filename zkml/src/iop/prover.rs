@@ -28,7 +28,7 @@ use crate::{
         table::Table,
     },
     measure::{self, LAYER_WISE_MEASURE_PREFIX},
-    model::{Model, Trace},
+    model::{Model, Trace, trace::Step},
     poly_commit::{
         context::CommittedPolynomial, prover::CommitmentProver, verifier::VerifierCommitment,
     },
@@ -152,6 +152,52 @@ pub(crate) type GenericModelLayers<M> = HashMap<NodeId, M>;
 pub type ModelLayers = GenericModelLayers<Layer<Element>>;
 /// Type alias for the set of references to layers of a model, indexed by its `NodeId`
 pub type ModelLayersRef<'a> = GenericModelLayers<&'a Layer<Element>>;
+
+/// 记录单个可证明节点的计算参数大小(元素数/num_vars/查表层位宽), 供与文档 F §7
+/// (MSM 块数、sumcheck 实例数) 的逐节点实测对账。走 `measure::set`, 输出进 CSV。
+/// 键统一带 `layerwise_` 前缀并含 node_id, 避免全局扁平 map 覆盖。
+fn record_layer_params<F: PrimeField>(
+    node_id: &NodeId,
+    kind: &str,
+    section: &Step<Element>,
+    ctx: &LayerCtx<F>,
+) -> anyhow::Result<()> {
+    let prefix = format!("layerwise_n{}_{}", node_id.0, kind);
+    // 该节点真正物化的 trace 张量(e.g. 输出), 未填充元素数 = 文档 F 口径
+    let out_tensors = section.output_tensors()?;
+    let in_tensors = section.input_tensors()?;
+    let out_elems_unpad: usize = out_tensors.iter().map(|t| t.shape().numel()).sum();
+    let in_elems_unpad: usize = in_tensors.iter().map(|t| t.shape().numel()).sum();
+    // pad 到 2 的幂后才是 fieldize→MLE 的尺寸, num_vars = log2
+    let out_elems_pad: usize = out_tensors
+        .iter()
+        .map(|t| t.clone().pad_next_power_of_two().shape().numel())
+        .sum();
+    // 查表层: 每个 table 的位宽即 LogUp 折叠轮数 d_L (log2(表元素数))
+    let (tables, total_bits): (usize, usize) = ctx
+        .lookup_tables()
+        .map(|ts| (ts.len(), ts.iter().map(|t| t.table_bit_size()).sum()))
+        .unwrap_or((0, 0));
+
+    measure::set(&format!("{prefix}__in_elems_unpad"), in_elems_unpad);
+    measure::set(&format!("{prefix}__out_elems_unpad"), out_elems_unpad);
+    measure::set(&format!("{prefix}__out_elems_pad"), out_elems_pad);
+    measure::set(&format!("{prefix}__num_vars"), out_elems_pad.ilog2());
+    measure::set(&format!("{prefix}__tables"), tables);
+    measure::set(&format!("{prefix}__table_bits"), total_bits);
+    debug!(
+        "== [params] n={} kind={}: in {} / out {} (unpad), pad {} (num_vars={}), tables={}, table_bits={} ==",
+        node_id.0,
+        kind,
+        in_elems_unpad,
+        out_elems_unpad,
+        out_elems_pad,
+        out_elems_pad.ilog2(),
+        tables,
+        total_bits,
+    );
+    Ok(())
+}
 
 impl<'a, 'b, F, T, PCS> Prover<'a, 'b, F, T, PCS>
 where
@@ -761,6 +807,8 @@ where
                         ChunkedNode::SplitLayer(_) => split_layer.as_ref().unwrap(),
                         ChunkedNode::RecombinationLayer(_) => recombination_layer.as_ref().unwrap(),
                     };
+                    // 记录该算子计算参数大小(元素数/num_vars/查表层), 见 `record_layer_params`
+                    record_layer_params(&node_id, op.as_kind_str(), section, ctx)?;
                     let my_claims = if op.is_provable() {
                         debug!("proving layer {:?}", op.describe());
                         measure::r_and_accumulate(
@@ -1015,6 +1063,15 @@ where
         );
         let _guard = span.enter();
 
+        // 仪器化日志: 打印整份 full trace 的元素数/字节数(i64), 用于核验 F 文档 trace 数据量
+        let (ft_elements, ft_bytes) = full_trace.element_volume();
+        debug!(
+            "== [tracer] full trace volume: {} elements ({:.3} MB i64, {:.3} MB Fr) ==",
+            ft_elements,
+            ft_bytes as f64 / 1e6,
+            ft_elements as f64 / 1e6 * 4.0,
+        );
+
         // split in chunks
         let (chunks, split_info) = ctx.split_in_chunks(num_chunks, chunking_strategy)?;
 
@@ -1121,6 +1178,15 @@ where
     where
         'd: 'a,
     {
+        // 仪器化日志: witness 批量承诺前打印本 chunk trace 数据量, 之后即 fieldize→MLE→MSM
+        let (chunk_elements, chunk_bytes) = chunk_trace.element_volume();
+        debug!(
+            "== [tracer] before witness batch commit, chunk {}: {} elements ({:.3} MB i64, {:.3} MB Fr) ==",
+            chunk.chunk_id,
+            chunk_elements,
+            chunk_bytes as f64 / 1e6,
+            chunk_elements as f64 / 1e6 * 4.0,
+        );
         let LookupWitness {
             logup_witnesses,
             table_witnesses,

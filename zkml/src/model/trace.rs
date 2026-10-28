@@ -340,6 +340,26 @@ where
 }
 
 impl Trace<Element> {
+    /// Total number of i64 elements stored across every step's inputs and
+    /// outputs (unpadded shapes). Values include: - both inputs and outputs of
+    /// each step, summed over all steps. Returns `(elements, bytes)` where
+    /// `bytes = elements * size_of::<Element>()` (i64, 8 B).
+    ///
+    /// Used by instrumentation logging to report trace data d before
+    /// fieldization / batch commitment.
+    pub(crate) fn element_volume(&self) -> (usize, usize) {
+        let mut elements = 0usize;
+        for step in self.steps.values() {
+            if let Ok(inputs) = step.input_tensors() {
+                elements += inputs.iter().map(|t| t.shape().numel()).sum::<usize>();
+            }
+            if let Ok(outputs) = step.output_tensors() {
+                elements += outputs.iter().map(|t| t.shape().numel()).sum::<usize>();
+            }
+        }
+        (elements, elements * 8)
+    }
+
     /// Given as input a trace over quantized values, compute the equivalent
     /// trace with dequantized values
     pub fn dequantized(&self, model_metadata: &ModelMetadata) -> Result<Trace<f32>, StoreError> {

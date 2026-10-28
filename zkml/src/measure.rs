@@ -63,6 +63,7 @@ use std::{
     fs::{File, OpenOptions},
     io::BufRead,
     str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
     sync::Mutex,
     time::{self, Duration},
 };
@@ -314,6 +315,53 @@ fn timeit<T, F: FnOnce() -> T>(f: F) -> (T, Duration) {
     let result = f();
     let elapsed = start.elapsed();
     (result, elapsed)
+}
+
+/// 进程级「即时RSS」历史新高。跨 executor / prover 共享, 便于在整条 prove 链路上
+/// 统一确认真实峰值; 用手动 reset 可实现"只统计某个时间段内"的增量峰值。
+static RSS_HWM: AtomicU64 = AtomicU64::new(0);
+
+/// 当前进程即时驻留内存字节数。读 `/proc/self/statm`(Linux), 第二列 = 驻留页数 × 页大小。
+/// 与 bench-llm 的 `current_rss_bytes` 一致, 是瞬时值、可定位"出现在哪一段"。
+pub fn mem_rss_bytes() -> u64 {
+    static STATM: &str = "/proc/self/statm";
+    let pages = std::fs::read_to_string(STATM)
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
+        .unwrap_or(0);
+    pages * 4096
+}
+
+/// 进程级即时RSS 历史峰值: 更新 HWM 并返回其当前值。
+pub fn mem_hwm_bytes() -> u64 {
+    let current = mem_rss_bytes();
+    let mut prev = RSS_HWM.load(Ordering::Relaxed);
+    while current > prev {
+        match RSS_HWM.compare_exchange(prev, current, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => prev = actual,
+        }
+    }
+    RSS_HWM.load(Ordering::Relaxed)
+}
+
+/// 把历史峰值重置为当前即时值(当你想只统计"接下来这一段"的增量峰值时用)。
+pub fn mem_hwm_reset() {
+    let current = mem_rss_bytes();
+    RSS_HWM.store(current, Ordering::Relaxed);
+}
+
+/// 一处统一的 RSS 打点: 打印即时 RSS 和进程级 HWM(MB)。`scope` 用来标明是哪一段。
+#[macro_export]
+macro_rules! mem_trace {
+    ($scope:expr) => {
+        ::tracing::debug!(
+            "== [mem] {} => rss_now={:.2} MB, rss_hwm={:.2} MB ==",
+            $scope,
+            $crate::measure::mem_rss_bytes() as f64 / 1e6,
+            $crate::measure::mem_hwm_bytes() as f64 / 1e6,
+        )
+    };
 }
 
 #[cfg(test)]

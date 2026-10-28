@@ -77,7 +77,18 @@ impl LookupInputConfig {
             .ok_or(anyhow!("Could not find challenges for ShiftCheckTable"))?;
         let (value_constant_challenge, value_column_sep) = challenge_storage
             .get_challenges_by_name(&chunking_info.table().name())
-            .ok_or(anyhow!("Could not find challenges for ValueTable"))?;
+            .ok_or_else(|| {
+                let mut keys: Vec<_> = challenge_storage
+                    .keys()
+                    .map(|k| k.to_string())
+                    .collect();
+                keys.sort();
+                anyhow!(
+                    "Could not find challenges for ValueTable (query={}, keys={:?})",
+                    chunking_info.table().name(),
+                    keys
+                )
+            })?;
         let zero_opt = challenge_storage.get_challenges_by_name(&zero_check_table.name());
         // For the signed zero check table we return an option since not all lookup operations will use it
         let signed_zero_opt =

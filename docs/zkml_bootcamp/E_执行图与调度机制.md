@@ -4,7 +4,7 @@
 >
 > **面向**：准备对照 [prover.rs](zkml/src/iop/prover.rs)、[executor.rs](zkml/src/graph/executor.rs)、[scheduler.rs](zkml/src/graph/scheduler.rs)、[prover_graph.rs](zkml/src/iop/prover_graph.rs) 读源码，或想彻底搞懂"一次 prove 在调度层到底怎么流转"的读者。
 >
-> **与相邻文档的关系**：本文是 [D](D_prove算法全流程详解.md) §0.1 那张调用树的**调度层细解**（D 只给树、不细讲循环）；[H](H_prove全算子清单与数据流.md) 讲 prove_chunk 内部的微算子（调度层之下的内容）。本文只覆盖"执行图 = 3 类节点 + 调度循环"，**不进入 prove_chunk 内部**。
+> **与相邻文档的关系**：本文是 [D](D_prove算法全流程详解.md) §0.1 那张调用树的**调度层细解**（D 只给树、不细讲循环）；[D](D_prove算法全流程详解.md) 附录 G 讲 prove_chunk 内部的微算子/密码单元（调度层之下的内容）。本文只覆盖"执行图 = 3 类节点 + 调度循环"，**不进入 prove_chunk 内部**。
 >
 > **先立框架**：要理解这段代码，必须先分清三个**井水不犯河水**的抽象层次——它们各有各的"节点"概念，别混：
 >
@@ -12,7 +12,7 @@
 > |---|---|---|---|
 > | **① 模型网络图** | `model/mod.rs` | `Layer`（一层神经网络） | `prove_chunk` 内部逐节点跑 sumcheck |
 > | **② 执行图**（本文主场） | `prover.rs` 建、`scheduler.rs` 调度 | `ChunkProver` 等三大类节点 | 调度器 + executor |
-> | **③ 微算子** | `H_prove…` | 域化/MLE/承诺/打开算子 | 落到硬件时使用 |
+> | **③ 微算子** | [D 附录 G](D_prove算法全流程详解.md#附录-g--微算子--密码单元--算子族下钻) | 域化/MLE/承诺/打开算子 | 落到硬件时使用 |
 >
 > 本文从进 ② 这一层：`execution_graph` 的节点**不是 model 的 layer**，而是 `ProverSplit / ChunkProver / Final`。**gpt2 和 llama2-7B 的 layer 数差异永远到不了这一层**——它们被整个装进一个 `ChunkProver`，调度层看不见。
 

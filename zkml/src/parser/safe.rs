@@ -13,6 +13,7 @@
 //!   conventions are handled by higher-level code.
 
 use std::{
+    collections::HashMap,
     fmt::Display,
     fs::File,
     io::Read,
@@ -99,19 +100,31 @@ impl RawSafeTensors {
 
     /// Cached variant that stores files under the test cache directory (model_cache/<repo>/)
     /// and only downloads when missing. Paths are resolved via `parser::file_cache::from_cache`.
+    ///
+    /// Supports both a single `model.safetensors` and the sharded layout
+    /// (`model.safetensors.index.json` + `model-0000X-of-NN.safetensors`). For a
+    /// sharded model, `model_path()` points at the index file and shards are read
+    /// from the same directory.
     pub fn from_hugging_face_cached(repo: &str) -> anyhow::Result<Self> {
         use crate::parser::file_cache;
         use std::fs;
 
         let rel_model = format!("{repo}/model.safetensors");
+        let rel_index = format!("{repo}/model.safetensors.index.json");
         let rel_tokenizer = format!("{repo}/tokenizer.json");
         let rel_config = format!("{repo}/config.json");
 
         let model_path = file_cache::cache_path(&rel_model);
+        let index_path = file_cache::cache_path(&rel_index);
         let tokenizer_path = file_cache::cache_path(&rel_tokenizer);
         let config_path = file_cache::cache_path(&rel_config);
 
-        if !(model_path.exists() && tokenizer_path.exists() && config_path.exists()) {
+        // A model is present if either the single file exists, or the sharded index
+        // (and at least the shards it references) exists.
+        let model_present = model_path.exists()
+            || (index_path.exists() && discover_weight_map(&index_path)?.len() > 0);
+
+        if !(model_present && tokenizer_path.exists() && config_path.exists()) {
             let dest = PathBuf::from("model_cache").join(repo);
             if !dest.exists() {
                 fs::create_dir_all(&dest)
@@ -120,9 +133,15 @@ impl RawSafeTensors {
             let _ = Self::from_hugging_face(repo, &dest)?;
         }
 
-        let model = file_cache::from_cache(&rel_model)?;
         let tokenizer = file_cache::from_cache(&rel_tokenizer)?;
         let config = file_cache::from_cache(&rel_config)?;
+        // For sharded models the entry point is the index file (the loader auto-detects
+        // the shards alongside it); for single-file models it is `model.safetensors`.
+        let model = if model_path.exists() {
+            file_cache::from_cache(&rel_model)?
+        } else {
+            file_cache::from_cache(&rel_index)?
+        };
 
         Ok(Self::new(model, tokenizer, config))
     }
@@ -263,33 +282,124 @@ impl ModelNameProvider for RawSafeTensors {
     }
 }
 
-/// Loader for tensors stored in a SafeTensors file.
+/// Loader for tensors stored in SafeTensors file(s).
 ///
 /// The loader maintains an internal prefix to support hierarchical naming
 /// (e.g., `blk.0.attn_q.weight`), mimicking the ergonomics of the GGUF loader.
+///
+/// It supports both a single `model.safetensors` file and the sharded layout
+/// (`model.safetensors.index.json` + `model-00001-of-NN.safetensors`). When a
+/// `model.safetensors.index.json` sibling is found, tensors are routed to the
+/// shard file that owns them according to the index `weight_map`.
 #[derive(Clone)]
 pub struct FileTensorLoader {
     /// Entire file contents held in memory to satisfy the borrowing
-    /// requirements of `safetensors::SafeTensors` views.
+    /// requirements of `safetensors::SafeTensors` views. In single-file mode
+    /// this is the only shard; in sharded mode it is the first shard (used to
+    /// service header/metadata queries that are not tensor-specific).
     bytes: Arc<Vec<u8>>,
+    /// Shard file contents keyed by shard file name (e.g. `model-00001-of-02.safetensors`).
+    /// Empty in single-file mode.
+    shards: Arc<HashMap<String, Arc<Vec<u8>>>>,
+    /// Mapping from tensor full-name to the shard file name that holds it,
+    /// read from `model.safetensors.index.json`. Empty in single-file mode.
+    weight_map: Arc<HashMap<String, String>>,
     /// Current prefix for tensor names. Appended in front of requested keys.
     current_prefix: String,
 }
 
-impl FileTensorLoader {
-    /// Build a loader from a file path.
-    pub fn from_path<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
-        let mut f = File::open(path.as_ref()).with_context(|| {
-            format!(
-                "Failed to open SafeTensors file: {}",
-                path.as_ref().display()
-            )
+/// Find the tensor-to-shard map described by a `model.safetensors.index.json`
+/// alongside `model.safetensors` (single-file mode returns an empty map).
+fn discover_weight_map(model_path: &Path) -> anyhow::Result<HashMap<String, String>> {
+    let index_path = model_path.with_file_name("model.safetensors.index.json");
+    if !index_path.exists() {
+        return Ok(HashMap::new());
+    }
+    let index: json::Value = json::from_reader(File::open(&index_path).with_context(|| {
+        format!("Failed to open shard index: {}", index_path.display())
+    })?)?;
+    let mut map = HashMap::new();
+    if let Some(weight_map) = index.get("weight_map").and_then(|v| v.as_object()) {
+        for (name, shard) in weight_map {
+            if let Some(shard) = shard.as_str() {
+                map.insert(name.clone(), shard.to_string());
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// Read the byte payloads for a (possibly sharded) model into memory.
+///
+/// Returns `(first_shard_bytes, all_shards_by_name, weight_map)`.
+/// - Single-file mode: the single file is `bytes`/`shards` (one entry), `weight_map` empty.
+/// - Sharded mode: `bytes` is the first shard (for header/metadata queries),
+///   `shards` holds every shard by file name, and `weight_map` routes tensor names.
+fn discover_shards(
+    model_path: &Path,
+) -> anyhow::Result<(Arc<Vec<u8>>, Arc<HashMap<String, Arc<Vec<u8>>>>, Arc<HashMap<String, String>>)> {
+    let weight_map = discover_weight_map(model_path)?;
+
+    let read_file = |path: &Path| -> anyhow::Result<Arc<Vec<u8>>> {
+        let mut f = File::open(path).with_context(|| {
+            format!("Failed to open SafeTensors file: {}", path.display())
         })?;
         let mut bytes = Vec::new();
         f.read_to_end(&mut bytes)
-            .with_context(|| "Failed to read SafeTensors file")?;
+            .with_context(|| format!("Failed to read SafeTensors file: {}", path.display()))?;
+        Ok(Arc::new(bytes))
+    };
+
+    // Gather the shard file names to load: if an index exists, load the shards it
+    // references; otherwise treat the single file as the only shard.
+    let shard_names: Vec<String> = if weight_map.is_empty() {
+        model_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .into_iter()
+            .collect()
+    } else {
+        let mut names: Vec<String> = weight_map
+            .values()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        names.sort();
+        names
+    };
+
+    let mut shards = HashMap::new();
+    for name in &shard_names {
+        let path = model_path.with_file_name(name);
+        shards.insert(name.clone(), read_file(&path)?);
+    }
+
+    // `bytes` = the first shard (single-file mode: the whole model; sharded mode: for header/metadata ops)
+    let bytes = shards
+        .get(shard_names.first().ok_or_else(|| anyhow::anyhow!("no safetensors shard to load"))?)
+        .cloned()
+        .expect("first shard guaranteed present");
+
+    Ok((bytes, Arc::new(shards), Arc::new(weight_map)))
+}
+
+impl FileTensorLoader {
+    /// Build a loader from a model path.
+    ///
+    /// - If the path points to a single `model.safetensors` (or any single
+    ///   `.safetensors` file) with **no** `model.safetensors.index.json` sibling,
+    ///   the loader operates on that one file.
+    /// - If a `model.safetensors.index.json` sibling exists, the path is treated
+    ///   as the base of a sharded model: all shard files referenced by the index
+    ///   are loaded and tensors are routed by name.
+    pub fn from_path<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+        let path = path.as_ref();
+        let (bytes, shards, weight_map) = discover_shards(path)?;
         Ok(Self {
-            bytes: Arc::new(bytes),
+            bytes,
+            shards,
+            weight_map,
             current_prefix: String::new(),
         })
     }
@@ -314,14 +424,33 @@ impl FileTensorLoader {
     pub fn pp(&self, prefix_extension: &str) -> Self {
         Self {
             bytes: Arc::clone(&self.bytes),
+            shards: Arc::clone(&self.shards),
+            weight_map: Arc::clone(&self.weight_map),
             current_prefix: format!("{}{}", self.current_prefix, prefix_extension),
         }
+    }
+
+    /// Return the byte payload of the shard holding tensor `full_name`, falling
+    /// back to the primary file in single-file mode.
+    fn resolve_bytes(&self, full_name: &str) -> &Arc<Vec<u8>> {
+        if let Some(shard) = self.weight_map.get(full_name) {
+            if let Some(bytes) = self.shards.get(shard) {
+                return bytes;
+            }
+        }
+        // Single-shard mode (weight_map empty) or fallback: use the primary file.
+        &self.bytes
+    }
+
+    /// Deserialize the `SafeTensors` view for the shard holding `full_name`.
+    fn deserialize_for(&self, full_name: &str) -> anyhow::Result<SafeTensors<'_>> {
+        SafeTensors::deserialize(self.resolve_bytes(full_name)).map_err(anyhow::Error::from)
     }
 
     /// Return the shape of a tensor without materializing it.
     pub fn get_tensor_shape(&self, name: &str) -> anyhow::Result<Shape> {
         let full = self.full_name(name);
-        let st = self.deserialize()?;
+        let st = self.deserialize_for(&full)?;
         let view = st
             .tensor(&full)
             .with_context(|| format!("tensor not found: {full}"))?;
@@ -331,7 +460,7 @@ impl FileTensorLoader {
     /// Load a tensor and convert to `Tensor<f32>` (supports F32/F16/BF16).
     pub fn get_tensor(&self, name: &str) -> anyhow::Result<KeyedTensor<f32>> {
         let full = self.full_name(name);
-        let st = self.deserialize()?;
+        let st = self.deserialize_for(&full)?;
         let view = st
             .tensor(&full)
             .with_context(|| format!("tensor not found: {full}"))?;
@@ -391,11 +520,6 @@ impl FileTensorLoader {
 
     fn full_name(&self, name: &str) -> String {
         format!("{}{}", self.current_prefix, name)
-    }
-
-    fn deserialize(&self) -> anyhow::Result<SafeTensors<'_>> {
-        // Parsing the header is fast relative to IO; we keep the code simple and re-create the view.
-        SafeTensors::deserialize(&self.bytes).map_err(anyhow::Error::from)
     }
 
     fn header_json(&self) -> anyhow::Result<json::Value> {

@@ -191,6 +191,10 @@ where
             .get(name)
             .map(|challenges| (self.constant_challenge, *challenges))
     }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.challenge_map.keys()
+    }
 }
 
 pub(crate) fn compute_claim<F: PrimeField, T: Transcript>(

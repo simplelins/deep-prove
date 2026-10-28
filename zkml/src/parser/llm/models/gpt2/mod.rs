@@ -29,6 +29,7 @@ use crate::{
     },
 };
 use anyhow::Context;
+use tenstore::StorageKey;
 
 pub mod decoder;
 
@@ -253,7 +254,11 @@ impl ModelLoader<RawSafeTensors> for GPT2 {
             "O(sv)"
         };
         let equation = format!("{input_terms}->{output_terms}");
-        let proj_weights = KeyedTensor::try_from(&embeddings.mat)?;
+        let mut proj_weights = KeyedTensor::try_from(&embeddings.mat)?;
+        // We need to modify the key to avoid conflicts between the embeddings matrix and the final projection
+        // the embeddings matrix is scaled _after_ parsing the model, but the final projection is *not* scaled
+        // so in effect, these are two different tensors and thus need to be represented by two different keys
+        proj_weights.key = StorageKey::from(format!("{}_final_proj", proj_weights.storage_key()));
         let final_proj = EinSum::<f32>::new(
             equation,
             vec![Some(proj_weights.into())],

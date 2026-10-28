@@ -499,9 +499,9 @@ FPGA-B(多轮 sumcheck / EQ-β 引擎)                 ← 吃 ~35%
 | ③ KZG 批打开 | `b_poly=Σ q_powers·polys`（k× 线性组合）→ `compute_witness_polynomial`(3×O(n)) → **3 个 size=n MSM** | **3·n 点乘（全 prover 最大 MSM 块）** | 同承诺引擎 + 长串行除法链 |
 | （结果） | 产 k−1 个 G1 + 3 个 G1 + 3k 域 evals | — | — |
 
-- **每次打开 G1 点乘 ≈ (n−2)+3n ≈ 4n**，其中 3n 来自阶段③ witness MSM；加上单独承诺的 n，**打开侧 ≈ 承诺侧 4×**。
+- **每次打开 G1 点乘 ≈ (n−2)+3n ≈ 4n**，其中 3n 来自行③ KZG 批打开的 3 点 MSM（段D）；加上单独承诺的 n，**打开侧 ≈ 承诺侧 4×**。
 - `compute_witness_polynomial`（`mod.rs:171-183`）是**串行 Horner 依赖链** `h[i-1]=f[i]+h[i]*u`，O(n) 乘加一次合成除法，**对 FPGA 流水/时序不友好**，需按窗口/SIMD 分解。
-- 阶段①的折叠 `out[j]=r*(poly[2j+1]−poly[2j])+poly[2j]` 与 EQ/fold 引擎**同构可复用**。
+- 段D 打开折叠（行① Phase1）`out[j]=r*(poly[2j+1]−poly[2j])+poly[2j]` 与 EQ/fold 引擎**同构可复用**。
 
 ## 6.3 EQ/β 张量积引擎（sumcheck 每轮最被调用的内核）
 

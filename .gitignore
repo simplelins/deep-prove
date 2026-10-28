@@ -28,3 +28,20 @@ devenv.local.nix
 # direnv
 .direnv
 .nltk_data
+zkml/perf/
+zkml/runlog/
+model_cache/*
+zkml/model_cache
+zkml/model_cache/openai-community/gpt2/config.json
+zkml/model_cache/openai-community/gpt2/model.safetensors
+zkml/model_cache/openai-community/gpt2/tokenizer.json
+
+
+# pk vk
+*.pk
+*.vk
+
+# python
+*.py
+__pycache__/
+*.pyc

@@ -1043,6 +1043,240 @@ mod test {
         Ok(())
     }
 
+    /// Benchmark comparing the cost of obtaining an inference trace through:
+    ///   1) running the inference directly (the path used by bench/llm.rs,
+    ///      which also streams every tensor into the on-disk `GenStore` from a
+    ///      background thread while inference proceeds),
+    ///   2) drying the trace and re-hydrating every tensor from the on-disk
+    ///      store (store fetch + msgpack decode + burn tensor rebuild),
+    ///   3) serializing the whole trace (tensor data embedded) into a single
+    ///      file and reading it back.
+    ///
+    /// Run with (adjust TRACE_BENCH_CTX to the desired context length):
+    ///   TRACE_BENCH_CTX=64 cargo test --release -p zkml bench_trace_disk_load -- --ignored --nocapture
+    #[test]
+    #[ignore = "performance benchmark -- run with --ignored --nocapture"]
+    fn bench_trace_disk_load_vs_regen() -> anyhow::Result<()> {
+        use std::{hint::black_box, time::Instant};
+
+        use crate::{
+            model::trace::Trace,
+            tensor::TensorHandle,
+        };
+
+        init_test_logging("info");
+        let ctx: usize = std::env::var("TRACE_BENCH_CTX")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64)
+            .max(4);
+        // LRU cache size of the store in MiB. A small value forces every
+        // rehydration to actually read (and re-decode) the backing files on
+        // disk, instead of hitting the in-memory cache.
+        let lru_mib: usize = std::env::var("TRACE_BENCH_LRU_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(200);
+        println!();
+        println!(
+            "=== trace disk benchmark: max_context = {ctx}, store LRU = {lru_mib} MiB"
+        );
+
+        let raw = RawSafeTensors::from_hugging_face_cached("openai-community/gpt2")?;
+        let float_driver = Driver::load_from_model(GPT2::new(), &raw, Some(ctx))?;
+        let (mut driver, _metadata) = float_driver.into_provable_llm(None)?;
+        driver.with_max_context(ctx);
+
+        // Random tokens avoid hitting EOS, so generation runs until max context.
+        let tokens = driver.random_sequence(ctx - 2);
+        let input_tensor = driver.tokens_to_tensor(&tokens)?;
+
+        type D = i64;
+        // Build the full-sequence input tensor the same way run_elements does
+        // (llm.rs:556) -- tokens_to_tensor is not usable here since the
+        // driver's context_length equals max_context, and a full-length input
+        // is rejected by its length check.
+        let to_full_tensor = |tokens: &[Token]| -> anyhow::Result<crate::Tensor<D>> {
+            Ok(crate::Tensor::new(
+                crate::Shape::new(vec![tokens.len()]),
+                tokens
+                    .iter()
+                    .map(|t| t.as_tensor_type_param::<D>())
+                    .collect::<Vec<_>>(),
+            )?)
+        };
+        fn hydrate(trace: &mut Trace<D>) -> anyhow::Result<(usize, usize, std::time::Duration)> {
+            // Free every in-memory tensor copy, forcing subsequent accesses to
+            // reload the data from the backing store (disk/LRU).
+            trace.dry_handles();
+            let mut handles = 0usize;
+            let mut elems = 0usize;
+            let start = Instant::now();
+            let mut touch = |h: &TensorHandle<D>| -> anyhow::Result<()> {
+                match h {
+                    TensorHandle::WrappedTensor(..) => {
+                        let g = h.wrapped_tensor()?;
+                        elems += g.shape().num_elements();
+                        black_box(&*g);
+                    }
+                    TensorHandle::Tensor(..) => {
+                        let g = h.tensor()?;
+                        elems += g.data().len();
+                        black_box(&*g);
+                    }
+                }
+                handles += 1;
+                Ok(())
+            };
+            trace.inputs().iter().try_for_each(&mut touch)?;
+            trace.outputs().iter().try_for_each(&mut touch)?;
+            for step in trace.steps.values() {
+                step.inputs().iter().try_for_each(&mut touch)?;
+                step.outputs().iter().try_for_each(&mut touch)?;
+            }
+            Ok((handles, elems * std::mem::size_of::<D>(), start.elapsed()))
+        }
+
+        // ---- Reference (untimed): sentence generation ----------------------------
+        // run_elements generates the sentence token by token (pure inference,
+        // NOT part of trace production) and finally runs the full graph once
+        // over the complete sequence, which is what actually produces the
+        // trace. We use it only to obtain the full input token sequence, and
+        // we report its overall duration as context; the *timed* metric below
+        // covers ONLY the trace-producing full forward.
+        //
+        // All progress lines also print the monotonic-clock offset from this
+        // point (in seconds), e.g. `[t0+X..t0+Y]`, so that the phase can be
+        // isolated from a `perf report --time X,Y` sample stream.
+        let t_start = Instant::now();
+        const MB: usize = 1024 * 1024;
+        let mut store_ref = GenStore::new_temporary(lru_mib * MB)?;
+        let ref_off0 = t_start.elapsed();
+        let t = Instant::now();
+        let trace_ref = driver.run_elements(input_tensor.clone(), &mut store_ref)?;
+        let t_run_elements = t.elapsed();
+        let ref_off1 = t_start.elapsed();
+
+        // Extract the complete input token sequence of the trace-producing run.
+        let full_tokens: Vec<i64> = match &trace_ref.inputs()[0] {
+            TensorHandle::Tensor(..) => trace_ref.inputs()[0].tensor()?.data().clone(),
+            TensorHandle::WrappedTensor(..) => trace_ref.inputs()[0].wrapped_tensor()?.get_data(),
+        };
+        let full_tokens = full_tokens
+            .iter()
+            .map(|t| Token::from(t.to_usize()))
+            .collect::<Vec<_>>();
+        let num_tokens = full_tokens.len();
+        drop(trace_ref);
+        drop(store_ref); // TempDir removed with it
+
+        // ---- 1. Trace generation (timed, precise) ---------------------------------
+        // This is exactly what run_elements does for its trace-producing step
+        // (llm.rs:568-572 -> model.run_with_split_nodes_info, mod.rs:1587): a
+        // single full forward over the complete sequence, on a clean model
+        // state, streaming every tensor into the store from the background
+        // thread. The token-by-token inference loop is NOT included.
+        let mut store = GenStore::new_temporary(lru_mib * MB)?;
+        let tensor_full = to_full_tensor(&full_tokens)?;
+        let gen_off0 = t_start.elapsed();
+        let t = Instant::now();
+        let mut trace = driver.model.run_with_split_nodes_info(vec![tensor_full], &mut store, None)?;
+        driver.model.reset();
+        let t_gen = t.elapsed();
+        let gen_off1 = t_start.elapsed();
+
+        let num_steps = trace.steps.len();
+        // GenStore's Debug impl prints one line per stored page: "<cached?> <key> <size> <file>"
+        let store_dump = format!("{store:?}");
+        let (mut store_files, mut store_bytes) = (0usize, 0u64);
+        for line in store_dump.lines().skip(1) {
+            let toks: Vec<&str> = line.split_whitespace().collect();
+            if toks.len() >= 2 {
+                if let Ok(sz) = toks[toks.len() - 2].parse::<u64>() {
+                    store_files += 1;
+                    store_bytes += sz;
+                }
+            }
+        }
+        println!(
+            "=== ref. run_elements total (sentence inference, NOT timed as generation): {t_run_elements:?} | perf window [t0+{:.1} .. t0+{:.1}]",
+            ref_off0.as_secs_f64(),
+            ref_off1.as_secs_f64()
+        );
+        println!(
+            "=== 1. trace generation (precise, single full forward, cold): {t_gen:?} | tokens: {num_tokens} | steps: {num_steps} | store pages: {store_files}, {:.1} MiB | perf window [t0+{:.1} .. t0+{:.1}]",
+            store_bytes as f64 / 1048576.0,
+            gen_off0.as_secs_f64(),
+            gen_off1.as_secs_f64()
+        );
+
+        // ---- 2. Drying + reloading everything from the store ----------------------
+        let (handles, elems, t_hydrate) = hydrate(&mut trace)?;
+        println!(
+            "=== 2. reload from store (dry + hydrate): {t_hydrate:?} | handles: {handles}, {:.1} MiB",
+            elems as f64 / 1048576.0
+        );
+        let (handles, elems, t_hydrate2) = hydrate(&mut trace)?;
+        println!(
+            "=== 2b. reload again (tensor re-wetted, same round): {t_hydrate2:?} | handles: {handles}, {:.1} MiB",
+            elems as f64 / 1048576.0
+        );
+
+        // ---- 3. Serialize the full trace (data embedded) into a single file -------
+        let t = Instant::now();
+        let ser = rmp_serde::to_vec(&trace)?;
+        let t_ser = t.elapsed();
+        let trace_path = std::env::temp_dir().join("zkml_trace_bench.msgpack");
+        std::fs::write(&trace_path, &ser)?;
+        println!(
+            "=== 3. serialize trace (data embedded): {t_ser:?} | {} bytes ({:.1} MiB) -> {trace_path:?}",
+            ser.len(),
+            ser.len() as f64 / 1048576.0
+        );
+
+        // ---- 4. Read + deserialize the trace file (pure load path) ---------------
+        let t = Instant::now();
+        let file_bytes = std::fs::read(&trace_path)?;
+        let read_done = t.elapsed();
+        let trace_file: Trace<D> = rmp_serde::from_slice(&file_bytes)?;
+        let t_des = t.elapsed();
+        drop(trace_file);
+        println!("=== 4. read file: {read_done:?} | deserialize (incl. tensor rebuild): {t_des:?}");
+
+        // ---- 5. Trace generation again (same process, caches warm) -----------------
+        let mut store2 = GenStore::new_temporary(lru_mib * MB)?;
+        let tensor_full2 = to_full_tensor(&full_tokens)?;
+        let warm_off0 = t_start.elapsed();
+        let t = Instant::now();
+        let _trace2 = driver.model.run_with_split_nodes_info(vec![tensor_full2], &mut store2, None)?;
+        driver.model.reset();
+        let t_gen_warm = t.elapsed();
+        let warm_off1 = t_start.elapsed();
+        println!(
+            "=== 5. trace generation (precise, warm process): {t_gen_warm:?} | perf window [t0+{:.1} .. t0+{:.1}]",
+            warm_off0.as_secs_f64(),
+            warm_off1.as_secs_f64()
+        );
+
+        // ---- summary --------------------------------------------------------------
+        let ratio = |label: &str, load: std::time::Duration, gen_time: std::time::Duration| {
+            let l = load.as_secs_f64();
+            let g = gen_time.as_secs_f64();
+            println!(
+                "=== summary | {label}: {l:.3}s vs trace generation {g:.3}s -> load is {:.1}% of generation time ({:.0}x faster)",
+                l / g * 100.0,
+                g / l
+            );
+        };
+        ratio("reload from store", t_hydrate, t_gen);
+        ratio("trace file deserialize", t_des, t_gen);
+
+        store.clean_up().ok();
+        store2.clean_up().ok();
+        std::fs::remove_file(&trace_path).ok();
+        Ok(())
+    }
+
     #[test]
     fn test_llm_driver_inference_gemma3() -> anyhow::Result<()> {
         const CONTEXT_SIZE: usize = 10;

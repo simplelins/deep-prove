@@ -187,6 +187,11 @@ impl ModelLoader<RawSafeTensors> for Gemma3 {
             .context("vocab_size not found")?;
         let eos_token = cfg
             .get::<u64, _>("eos_token_id")
+            .or_else(|| {
+                cfg.get::<Vec<u64>, _>("eos_token_id")
+                    .and_then(|v| v.first().copied())
+                    .into()
+            })
             .context("eos_token_id not found")?
             .into();
 

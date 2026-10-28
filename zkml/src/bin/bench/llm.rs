@@ -1,13 +1,13 @@
-use std::{fs::File, io::Write};
-
 use anyhow::bail;
 use ark_bn254::Bn254;
+use chrono::{DateTime, Local};
 use clap::{ArgGroup, Parser, ValueEnum, builder::ArgPredicate};
 #[cfg(not(feature = "cuda"))]
 use dp_crypto::arkyper::HyperKZG;
 #[cfg(feature = "cuda")]
 use dp_crypto::arkyper::hyperkzg_gpu::HyperKZGGpu;
 use libc::{RUSAGE_SELF, getrusage, rusage};
+use std::{fs::File, io::Write, path::Path, sync::Mutex, time::SystemTime};
 use tenstore::GenStore;
 use timed_core::Output;
 use tracing::{info, warn};
@@ -150,6 +150,36 @@ const HEADER_MIN_USER_LEN: &str = "min_user_len";
 const HEADER_INFERENCE_TIME: &str = "inference_time";
 const HEADER_PROOF_SIZE: &str = "proof_size";
 
+/// 生成一次运行的 CSV 输出文件名, 避免多次执行互相覆盖/混淆, 便于横向比较。
+/// 规则: `<bench 所在目录>/<bench 主干>.<model>_s<max_context>.<HHMMSS>.csv`
+/// - `bench`: 用户 `--bench` 指定的路径(可含目录), 取其主干;
+/// - model + s<max_context>: 标识本条数据来自哪个模型/序列长;
+/// - HHMMSS: 本次运行时间戳(每次执行不同 → 不覆盖)。
+/// 同一进程内 `--sequence a,b,c` 多序列长仍都写入同一时间戳文件(每行带 max_context 列),
+/// 跨进程重跑则各得一个独立文件。
+fn bench_csv_path(bench: &str, model: &str, max_context: usize) -> String {
+    let path = Path::new(bench);
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty());
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "bench".to_string());
+    // 获取当前时间戳, 转为日期和时间, 取日期时分秒作为文件名后缀, 避免覆盖
+    let now: DateTime<Local> = DateTime::<Local>::from(SystemTime::now());
+
+    // 格式 1：紧凑型，最常用
+    let stamp = now.format("%Y%m%d_%H%M%S").to_string();
+    let fname = format!("{stem}.{model}_s{max_context}.{stamp}.csv");
+    match dir {
+        Some(d) => {
+            let d = d.join("runlog");
+            std::fs::create_dir_all(&d).expect("Failed to create runlog directory");
+            d.join(fname).to_string_lossy().into_owned()
+        }
+        None => fname,
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let subscriber = tracing_subscriber::fmt::Subscriber::builder()
         .with_env_filter(EnvFilter::from_default_env())
@@ -190,6 +220,9 @@ fn main() -> anyhow::Result<()> {
         )
     };
 
+    let bench_file = bench_csv_path(&args.bench, &args.model.to_string(), max_context);
+    info!("CSV metrics will be written to `{}`", bench_file);
+
     info!(
         "Running with max context {} and user_prompt->max_length: {:?}",
         max_context,
@@ -201,6 +234,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let (driver, tokeniser) = parse_model(&args, max_context)?;
+    mem_snap("1.load_model");
 
     let mut premeasure = Measure::new()
         .with(HEADER_MODEL, &args.model.to_string())
@@ -222,6 +256,7 @@ fn main() -> anyhow::Result<()> {
             Model::Llama2 => premeasure.r(HEADER_MODEL_QUANT, || driver.into_provable_llm(None))?,
         }
     };
+    mem_snap("2.quantize");
 
     let (prover_ctx, mut verifier_ctx) = if let Some(ref params) = args.load_params {
         info!("Loading proving contexts from {params}.pk and {params}.vk...");
@@ -244,6 +279,7 @@ fn main() -> anyhow::Result<()> {
             premeasure.r(HEADER_CONTEXT_GENERATION, || driver.context())?;
         (prover_ctx, verifier_ctx)
     };
+    mem_snap("3.generate_contexts");
 
     if let Some(ref save_params) = args.save_params {
         if args.load_params.is_some() {
@@ -300,6 +336,7 @@ fn main() -> anyhow::Result<()> {
                 None,
             )
         };
+        mem_snap("4.trace_gen");
 
         if args.memory {
             info!(
@@ -312,9 +349,11 @@ fn main() -> anyhow::Result<()> {
             info!("Running distributed proving locally...");
             distributed::run_distributed(trace, &driver, &prover_ctx, chunks.unwrap())?
         } else {
+            mem_snap("5a.prove_before");
             let peak_rss = peak_rss_bytes();
             info!("Running proving locally...");
             let (proof, io) = driver.prove(&prover_ctx, trace)?;
+            mem_snap("5b.prove_after");
             let new_peak_rss = peak_rss_bytes();
             if new_peak_rss == peak_rss {
                 warn!(
@@ -341,6 +380,8 @@ fn main() -> anyhow::Result<()> {
         verifier_ctx
             .verify(proof, user_tokens, io)
             .expect("invalid proof");
+        mem_snap("6.verify");
+        mem_dump();
         if !args.distributed {
             measure::post_process(|metrics| {
                 let Ok(proof_time) = metrics.get("prove_full").unwrap().parse::<usize>() else {
@@ -354,10 +395,105 @@ fn main() -> anyhow::Result<()> {
                 metrics.insert("token/sec".to_string(), token_per_second.to_string());
             })?;
         }
-        measure::to_csv(&args.bench)?;
+        measure::to_csv(&bench_file)?;
     }
 
     Ok(())
+}
+
+/// 在当前进程整条 bench 流程的若干关键节点采一次内存快照, 汇总到一张表.
+///
+/// goal(任务一 "定位 256G 爆点"): 一次性把 trace 生成 / prove 各阶段的
+/// 「当前 RSS」和「进程累计触碰峰值 RSS」都打出来, 不用逐个函数塞日志.
+///
+/// - 当前 RSS: 读 `/proc/self/statm`(Linux), 真实驻留内存, 可分段(只代表此刻).
+/// - 进程峰值 RSS: `getrusage.ru_maxrss`, 整个进程生命周期只增不减, 只做兜底上限.
+///   之所以两者都记: ru_maxrss 分不出"峰值出现在哪一段", 只有当前RSS能定位到节点.
+#[derive(Default)]
+struct MemProbe {
+    /// snapshot(label) 每调用一次 push 一行; 结束由 dump() 打印成表
+    samples: Mutex<Vec<(String, u64, u64)>>, // (label, rss_current, rss_peak_process)
+}
+
+/// /proc/self/statm 第二列 = 驻留页数. pagesize 需要 `getconf PAGESIZE`, 这里用 4KiB 假定;
+/// 若不希望硬编码, 可用 libc::sysconf(_SC_PAGESIZE). 4KiB 在 x86_64/aarch64 Linux 上就是默认.
+fn current_rss_bytes() -> u64 {
+    static STATM: &str = "/proc/self/statm";
+    let pages = std::fs::read_to_string(STATM)
+        .ok()
+        .and_then(|s| {
+            s.split_whitespace()
+                .nth(1)
+                .and_then(|v| v.parse::<u64>().ok())
+        })
+        .unwrap_or(0);
+    pages * 4096
+}
+
+impl MemProbe {
+    fn snapshot(&self, label: &str) {
+        let cur = current_rss_bytes();
+        let peak = peak_rss_bytes();
+        self.samples
+            .lock()
+            .unwrap()
+            .push((label.to_string(), cur, peak));
+    }
+
+    /// 顺序打印每种内存的累计最大值及其出现节点, 一眼看清爆点在哪一段.
+    fn dump(&self) {
+        let samples = self.samples.lock().unwrap();
+        if samples.is_empty() {
+            return;
+        }
+        // 每个标签打印: 当前RSS(MB) 进程峰值RSS(MB) 相对上一段的当前RSS增量(MB)
+        info!("===== 内存探测快照 (MemProbe) =====");
+        info!(
+            "  {:<46} {:>10} {:>12} {:>12}",
+            "label", "cur_MB", "peak_MB", "cur_delta_MB"
+        );
+        let mut prev_cur = 0u64;
+        let mut max_cur: (u64, &str) = (0, "");
+        let mut max_peak: (u64, &str) = (0, "");
+        for (label, cur, peak) in samples.iter() {
+            let delta = cur.saturating_sub(prev_cur);
+            if *cur > max_cur.0 {
+                max_cur = (*cur, label);
+            }
+            if *peak > max_peak.0 {
+                max_peak = (*peak, label);
+            }
+            info!(
+                "  {:<46} {:>10.2} {:>12.2} {:>12.2}",
+                label,
+                *cur as f64 / 1e6,
+                *peak as f64 / 1e6,
+                delta as f64 / 1e6,
+            );
+            prev_cur = *cur;
+        }
+        info!(
+            "  -> 当前RSS峰值节点: {} ({:.2} MB); 进程累计峰值: {} ({:.2} MB)",
+            max_cur.1,
+            max_cur.0 as f64 / 1e6,
+            max_peak.1,
+            max_peak.0 as f64 / 1e6,
+        );
+        info!("===== MemProbe end =====");
+    }
+}
+
+thread_local! {
+    /// 全局跟踪器, 供 bench 流程里各处 snapshot() 打点
+    static MEM_PROBE: MemProbe = MemProbe::default();
+}
+
+fn mem_snap(label: &str) {
+    MEM_PROBE.with(|p| p.snapshot(label));
+}
+
+fn mem_dump() {
+    MEM_PROBE.with(|p| p.dump());
 }
 
 fn peak_rss_bytes() -> u64 {

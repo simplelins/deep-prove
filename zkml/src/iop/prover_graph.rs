@@ -18,6 +18,7 @@ use crate::{
         chunking::{ModelChunk, initialize_transcript_for_chunk},
     },
 };
+use tracing::debug;
 
 // A node in the execution graph of chunks whose job is to prove a chunk.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -196,6 +197,16 @@ where
                 let ProverGraphIO::ChunkProveInput(input) = inputs.pop().unwrap() else {
                     bail!("Expected input for chunk prover executor")
                 };
+                // 仪器化日志: 打印每个 ready node(本 chunk) 的 trace 元素数/字节数,
+                // 在 executor run 中执行到该节点时输出, 用于核验 F 文档 trace 数据量
+                let (chunk_elements, chunk_bytes) = input.trace.element_volume();
+                debug!(
+                    "== [tracer] ready node chunk {} trace volume: {} elements ({:.3} MB i64, {:.3} MB Fr) ==",
+                    input.chunk.chunk_id,
+                    chunk_elements,
+                    chunk_bytes as f64 / 1e6,
+                    chunk_elements as f64 / 1e6 * 4.0,
+                );
                 let chunk_proof = measure::r_if_bigger("chunk_prover", || {
                     let mut transcript: T = initialize_transcript_for_chunk(input.challenge);
                     let prover = Prover::new(ctx.ctx, &mut transcript);

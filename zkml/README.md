@@ -51,11 +51,11 @@ mdbook build docs --open
 
 The recommended path is **SafeTensors via Hugging Face**: pass `--hf <model-id>` and `bench-llm` will fetch and cache the weights automatically on first run. GGUF (`--gguf <path|url>`) and ONNX models are also supported.
 
-| Model | Recommended loader | Notes |
-|-------|--------------------|-------|
-| **GPT-2** | `--hf openai-community/gpt2` | SafeTensors auto-downloaded from HF. GGUF also supported (`--gguf gpt2.Q2_K.gguf`) |
-| **Gemma 3** | `--hf google/gemma-3-1b-it` | SafeTensors only |
-| **Llama 2** | `--hf meta-llama/Llama-2-7b-hf` | SafeTensors only. `--accuracy` mode currently falls back to default quantization for Llama 2 |
+| Model             | Recommended loader                | Notes                                                                                         |
+| ----------------- | --------------------------------- | --------------------------------------------------------------------------------------------- |
+| **GPT-2**   | `--hf openai-community/gpt2`    | SafeTensors auto-downloaded from HF. GGUF also supported (`--gguf gpt2.Q2_K.gguf`)          |
+| **Gemma 3** | `--hf google/gemma-3-1b-it`     | SafeTensors only                                                                              |
+| **Llama 2** | `--hf meta-llama/Llama-2-7b-hf` | SafeTensors only.`--accuracy` mode currently falls back to default quantization for Llama 2 |
 
 Supported transformer layers:
 
@@ -91,14 +91,24 @@ source $HOME/.cargo/env
 cargo build --release -p zkml --bin bench-llm
 ```
 
+```Shell
+source ~/miniconda3/bin/activate
+conda create -n deepprove-env python=3.11
+conda activate deepprove-env
+conda install cuda -c nvidia/label/cuda-13.3.0
+```
+
+
+
+
 ### Build (GPU)
 
 DeepProve ships two GPU feature flags:
 
-| Feature | Platform | Effect |
-|---------|----------|--------|
-| `cuda` | Linux + NVIDIA | Replaces the CPU PCS with `HyperKZGGpu` and runs inference on burn's CUDA backend — **fastest path** |
-| `wgpu` | Linux / macOS / Windows | Cross-platform GPU inference; PCS still runs on CPU |
+| Feature  | Platform                | Effect                                                                                                       |
+| -------- | ----------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `cuda` | Linux + NVIDIA          | Replaces the CPU PCS with`HyperKZGGpu` and runs inference on burn's CUDA backend — **fastest path** |
+| `wgpu` | Linux / macOS / Windows | Cross-platform GPU inference; PCS still runs on CPU                                                          |
 
 ```bash
 # Linux + NVIDIA: full GPU acceleration (inference + PCS)
@@ -196,26 +206,26 @@ cargo run --release --bin bench-llm -- \
 
 `bench-llm` produces two CSV files in the current directory:
 
-| File | Source | Contents |
-|------|--------|----------|
-| `bench-llm.csv` | `timed_core` | One row per timed function call across the run — useful for per-method profiling |
-| `bench.csv` (or `bench_distributed.csv` with `--distributed`) | `measure` | One row per benchmark trial with aggregated metrics |
+| File                                                                | Source         | Contents                                                                          |
+| ------------------------------------------------------------------- | -------------- | --------------------------------------------------------------------------------- |
+| `bench-llm.csv`                                                   | `timed_core` | One row per timed function call across the run — useful for per-method profiling |
+| `bench.csv` (or `bench_distributed.csv` with `--distributed`) | `measure`    | One row per benchmark trial with aggregated metrics                               |
 
 Columns in the per-run CSV (`bench.csv`):
 
-| Column | Meaning |
-|--------|---------|
-| `model_name` | `gpt2` / `gemma3` / `llama2` |
-| `num_threads` | Rayon thread count for this run |
-| `quantization_time` | One-off cost of converting the model to integer arithmetic (ms) |
-| `context_generation_time` | One-off cost of generating PK/VK (ms; `0` when `--load_params` is used) |
-| `max_context` | Maximum context window for this trial (tokens) |
-| `min_user_len` | Prompt length (tokens) |
-| `inference_time` | Quantized inference wall-time (ms) |
-| `prove_full` | Total proving wall-time (ms) |
-| `proof_size` | Serialized proof size (bytes) |
-| `prove_full_memory_peak` | Peak RSS during proving (MiB) |
-| `token/sec` | Derived as `max_context / prove_full` |
+| Column                      | Meaning                                                                    |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `model_name`              | `gpt2` / `gemma3` / `llama2`                                         |
+| `num_threads`             | Rayon thread count for this run                                            |
+| `quantization_time`       | One-off cost of converting the model to integer arithmetic (ms)            |
+| `context_generation_time` | One-off cost of generating PK/VK (ms;`0` when `--load_params` is used) |
+| `max_context`             | Maximum context window for this trial (tokens)                             |
+| `min_user_len`            | Prompt length (tokens)                                                     |
+| `inference_time`          | Quantized inference wall-time (ms)                                         |
+| `prove_full`              | Total proving wall-time (ms)                                               |
+| `proof_size`              | Serialized proof size (bytes)                                              |
+| `prove_full_memory_peak`  | Peak RSS during proving (MiB)                                              |
+| `token/sec`               | Derived as`max_context / prove_full`                                     |
 
 ### 10. Try Gemma 3 / Llama 2
 
@@ -223,10 +233,14 @@ Columns in the per-run CSV (`bench.csv`):
 # Gemma 3
 cargo run --release --bin bench-llm -- \
   --model gemma3 --hf google/gemma-3-1b-it --sequence 128
-
+cargo run --release --bin bench-llm -- \
+  --model gemma3 --hf google/gemma-3-270m-it --sequence 128
 # Llama 2
 cargo run --release --bin bench-llm -- \
   --model llama2 --hf meta-llama/Llama-2-7b-hf --sequence 128
+
+cargo run --release -p zkml --bin bench-llm -- \
+  --model llama2 --hf LLM-Research/Llama-3.2-1B --sequence 128
 ```
 
 Hugging Face access requires `huggingface-cli login` for gated models (e.g. Llama 2).
@@ -246,15 +260,15 @@ Run `bench-llm --help` for the full list of flags and options.
 Reference numbers on a 24-core / 504 GB CPU machine (AMD EPYC 9254, 2.9 GHz), HyperKZG PCS, default quantization:
 
 | Model   | Sequence | Prove time | Verify | Proof size | Throughput (tokens/s) | Throughput (tokens/min) |
-|---------|---------:|-----------:|-------:|-----------:|----------------------:|------------------------:|
-| GPT-2   |       64 |    2.35 min |  1.25 s |   7.95 MiB |                  0.45 |                      27 |
-| GPT-2   |      128 |    3.02 min |  1.14 s |   8.82 MiB |                  0.71 |                      42 |
-| GPT-2   |      256 |    4.60 min |  1.24 s |   9.77 MiB |                  0.93 |                      56 |
-| GPT-2   |      512 |    7.64 min |  1.33 s |  10.71 MiB |                  1.12 |                      67 |
-| Gemma 3 |       64 |    8.49 min |  3.69 s |  16.34 MiB |                  0.13 |                       8 |
-| Gemma 3 |      128 |   10.27 min |  3.88 s |  18.02 MiB |                  0.21 |                      12 |
-| Gemma 3 |      256 |   12.65 min |  4.09 s |  19.76 MiB |                  0.34 |                      20 |
-| Gemma 3 |      512 |   18.95 min |  4.32 s |  21.73 MiB |                  0.45 |                      27 |
+| ------- | -------: | ---------: | -----: | ---------: | --------------------: | ----------------------: |
+| GPT-2   |       64 |   2.35 min | 1.25 s |   7.95 MiB |                  0.45 |                      27 |
+| GPT-2   |      128 |   3.02 min | 1.14 s |   8.82 MiB |                  0.71 |                      42 |
+| GPT-2   |      256 |   4.60 min | 1.24 s |   9.77 MiB |                  0.93 |                      56 |
+| GPT-2   |      512 |   7.64 min | 1.33 s |  10.71 MiB |                  1.12 |                      67 |
+| Gemma 3 |       64 |   8.49 min | 3.69 s |  16.34 MiB |                  0.13 |                       8 |
+| Gemma 3 |      128 |  10.27 min | 3.88 s |  18.02 MiB |                  0.21 |                      12 |
+| Gemma 3 |      256 |  12.65 min | 4.09 s |  19.76 MiB |                  0.34 |                      20 |
+| Gemma 3 |      512 |  18.95 min | 4.32 s |  21.73 MiB |                  0.45 |                      27 |
 
 The CSV output column is `token/sec`; the per-minute number is provided here for convenience.
 
@@ -301,11 +315,11 @@ zkml/
 
 **Models & layers:**
 
-- [x] LLM inference proving (GPT-2, Gemma 3, Llama 2)
-- [x] Full transformer layer coverage (embeddings, attention, LayerNorm, RMSNorm, softmax, argmax)
-- [x] MLP, CNN (Dense, Conv2D, ReLU/GELU, MaxPool)
-- [x] Chunked / distributed proving
-- [x] Unpadded inference
+- [X] LLM inference proving (GPT-2, Gemma 3, Llama 2)
+- [X] Full transformer layer coverage (embeddings, attention, LayerNorm, RMSNorm, softmax, argmax)
+- [X] MLP, CNN (Dense, Conv2D, ReLU/GELU, MaxPool)
+- [X] Chunked / distributed proving
+- [X] Unpadded inference
 - [ ] Additional model families
 - [ ] More layer types (BatchNorm, Dropout, etc.)
 
@@ -313,8 +327,8 @@ zkml/
 
 **Performance:**
 
-- [x] HyperKZG PCS (CPU + GPU)
-- [x] GPU acceleration via `--features cuda` (Linux + NVIDIA) or `--features wgpu` (cross-platform inference)
+- [X] HyperKZG PCS (CPU + GPU)
+- [X] GPU acceleration via `--features cuda` (Linux + NVIDIA) or `--features wgpu` (cross-platform inference)
 - [ ] GPU proving cluster
 - [ ] Smaller, more frequent lookup tables
 - [ ] Improved parallelism for logup, GKR, sumchecks

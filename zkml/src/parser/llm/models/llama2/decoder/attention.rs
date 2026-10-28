@@ -21,7 +21,7 @@ use crate::{
     tensor::{Tensor, TensorHandle},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 #[derive(Clone, Debug)]
 pub struct Llama2Attention {
@@ -161,26 +161,38 @@ impl Load<SafeLoader> for Llama2Attention {
         //   Q[0, 1, :, :] = head 1*8 + 0 = head 8
         //   Q[7, 3, :, :] = head 3*8 + 7 = head 31
         // ===================================================================================
-        // Llama2 always uses GQA, so we use grouped shapes directly
-        let wq_reshape = vec![embedding_size, num_groups, heads_per_group, head_size];
-        let wk_wv_reshape = vec![embedding_size, num_groups, head_size];
-        // WO final shape is [g, h, d, e] to match attention output O's layout
-        let wo_reshape = vec![heads_per_group, num_groups, head_size, embedding_size];
-
-        let wq = loader
-            .get_tensor("self_attn.q_proj.weight")?
-            .try_map_tensor(|t| t.transpose()?.reshaped(wq_reshape.clone().into()))?;
-
-        let wk = loader
-            .get_tensor("self_attn.k_proj.weight")?
-            .try_map_tensor(|t| t.transpose()?.reshaped(wk_wv_reshape.clone().into()))?;
-
-        let wv = loader
-            .get_tensor("self_attn.v_proj.weight")?
-            .try_map_tensor(|t| t.transpose()?.reshaped(wk_wv_reshape.clone().into()))?;
-
+        // The attention equations chosen by `form_einsum_equations` depend on
+        // `heads_per_kv_head()` (= heads_per_group). When there is exactly one
+        // query head per KV head, MHA equations are used and the weights are
+        // laid out as 3D `[e, h, d]`/`[h, d, e]` with heads contiguous (no
+        // permutation). Only when heads_per_group > 1 (GQA) do we need the
+        // grouped 4D layout and the output-projection permutation below.
+        let (wq, wk, wv, wo) = if heads_per_group == 1 {
+            // === Multi Headed Attention (e.g. Llama-2-7b: 32 kv heads = 32 query heads) ===
+            // HF stores q/k/v_proj.weight as [num_heads * head_size, e] with heads
+            // contiguous, so transpose -> [e, h*d] and reshape -> [e, h, d].
+            let wq_kv_reshape = vec![embedding_size, num_groups, head_size];
+            let wq = loader
+                .get_tensor("self_attn.q_proj.weight")?
+                .try_map_tensor(|t| t.transpose()?.reshaped(wq_kv_reshape.clone().into()))?;
+            let wk = loader
+                .get_tensor("self_attn.k_proj.weight")?
+                .try_map_tensor(|t| t.transpose()?.reshaped(wq_kv_reshape.clone().into()))?;
+            let wv = loader
+                .get_tensor("self_attn.v_proj.weight")?
+                .try_map_tensor(|t| t.transpose()?.reshaped(wq_kv_reshape.clone().into()))?;
+            // HF stores o_proj.weight as [e, num_heads * head_size] with heads
+            // contiguous; the MHA output einsum is O(hqd) @ WO(hde), so WO = [h, d, e].
+            let wo = loader
+                .get_tensor("self_attn.o_proj.weight")?
+                .try_map_tensor(|t| {
+                    t.transpose()?
+                        .reshaped(vec![num_groups, head_size, embedding_size].into())
+                })?;
+            (wq, wk, wv, wo)
+        } else {
         // ===================================================================================
-        // Output Projection Weight Permutation (GQA only)
+        // Output Projection Weight Permutation (GQA)
         // ===================================================================================
         //
         // PROBLEM:
@@ -211,6 +223,22 @@ impl Load<SafeLoader> for Llama2Attention {
         //
         // After this, WO[g, h, d, e] correctly contains weight for head h*8 + g.
         // ===================================================================================
+        let wq_reshape = vec![embedding_size, num_groups, heads_per_group, head_size];
+        let wk_wv_reshape = vec![embedding_size, num_groups, head_size];
+        let wo_reshape = vec![heads_per_group, num_groups, head_size, embedding_size];
+
+        let wq = loader
+            .get_tensor("self_attn.q_proj.weight")?
+            .try_map_tensor(|t| t.transpose()?.reshaped(wq_reshape.clone().into()))?;
+
+        let wk = loader
+            .get_tensor("self_attn.k_proj.weight")?
+            .try_map_tensor(|t| t.transpose()?.reshaped(wk_wv_reshape.clone().into()))?;
+
+        let wv = loader
+            .get_tensor("self_attn.v_proj.weight")?
+            .try_map_tensor(|t| t.transpose()?.reshaped(wk_wv_reshape.clone().into()))?;
+
         let wo = loader
             .get_tensor("self_attn.o_proj.weight")?
             .try_map_tensor(|t| {
@@ -230,11 +258,12 @@ impl Load<SafeLoader> for Llama2Attention {
                 }
                 Tensor::new(wo_reshape.clone().into(), permuted)
             })?;
+            (wq, wk, wv, wo)
+        };
 
         let positional_config = PositionalConfig::Rope(RopeConfig {
-            base_frequency: config
-                .get::<f32, _>("rope_theta")
-                .context("rope_theta not found")?,
+            // HF Llama-2 default when the key is absent (e.g. `meta-llama/Llama-2-7b-hf`).
+            base_frequency: config.get::<f32, _>("rope_theta").unwrap_or(10000.0),
             max_seq_length: max_ctx_length,
             layout: RopeLayout::RotateHalf,
         });

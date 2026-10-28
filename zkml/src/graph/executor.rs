@@ -7,7 +7,46 @@ use anyhow::Context;
 use crossbeam_channel::unbounded;
 use rayon::scope;
 use std::collections::{BTreeMap, HashMap};
-use tracing::info_span;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{debug, info_span};
+
+/// 当前进程即时驻留内存 RSS。读 `/proc/self/statm`(Linux), 第二列 = 驻留页数 × 页大小。
+/// 与 bench-llm 里的 `current_rss_bytes` 保持一致, 都是瞬时值、可定位到"出现在哪一段"。
+fn current_rss_bytes() -> u64 {
+    static STATM: &str = "/proc/self/statm";
+    let pages = std::fs::read_to_string(STATM)
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()))
+        .unwrap_or(0);
+    pages * 4096
+}
+
+/// 所有 executor 共享的「进程级即时RSS 历史最大」, 供 `mem_hwm()` 查询。
+/// 只在 debug 打点路径写入, 不引入额外常驻聚合结构。
+static EXEC_RSS_HWM: AtomicU64 = AtomicU64::new(0);
+
+/// 更新并返回进程级 RSS 历史峰值(即时 RSS 中的最大值)。
+fn mem_hwm(current: u64) -> u64 {
+    let mut prev = EXEC_RSS_HWM.load(Ordering::Relaxed);
+    while current > prev {
+        match EXEC_RSS_HWM.compare_exchange(prev, current, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(actual) => prev = actual,
+        }
+    }
+    EXEC_RSS_HWM.load(Ordering::Relaxed)
+}
+
+/// 在每个 node 执行前调用, 打一行即时 RSS 跟历史峰值。`phase` 用于区分 ready batch 阶段。
+fn mem_trace(node_id: NodeId, desc: &str, phase: &str) {
+    let cur = current_rss_bytes();
+    let hwm = mem_hwm(cur);
+    debug!(
+        "== [mem] {phase} node_id={node_id:?} desc={desc:?} => rss_now={:.2} MB, rss_hwm={:.2} MB ==",
+        cur as f64 / 1e6,
+        hwm as f64 / 1e6,
+    );
+}
 
 /// A trait defining execution strategies for computational graphs.
 ///
@@ -106,9 +145,18 @@ where
         let mut ready_nodes = scheduler.init_nodes(input_data)?;
         let mut outputs = BTreeMap::new();
         while !scheduler.is_done() {
+            // 仪器化日志: 打印本批 ready nodes 的数目及其各节点描述,
+            // 便于把 exec_node 级常量与每 chunk trace 数据量对上
+            debug!("== [tracer] ready batch of {} node(s) ==", ready_nodes.len());
+            for node in ready_nodes.iter() {
+                debug!("  [tracer]   ready node: {}", node.node.describe());
+            }
             let node_outputs = ready_nodes
                 .iter_mut()
-                .map(|node| node.run(context))
+                .map(|node| {
+                    mem_trace(node.node_id, &node.node.describe(), "ready.seq");
+                    node.run(context)
+                })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             ready_nodes
                 .drain(..)
@@ -204,6 +252,7 @@ where
                             desc = %desc,
                         )
                         .entered();
+                        mem_trace(node.node_id, &desc, "ready.parallel");
                         match node.run(context) {
                             Ok(output) => tx.send((node.node_id, Ok(output))).expect(
                                 "Sender channel closed unexpectedly, can not send node result",

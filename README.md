@@ -18,8 +18,8 @@ This repository is a Rust workspace. The [`zkml`](zkml/) crate is the core provi
 
 Single-machine inference proving on a 24-core / 504 GB CPU server:
 
-| Model   | Sequence   | Prove time | Verify | Proof size | Throughput                    |
-|---------|-----------:|-----------:|-------:|-----------:|------------------------------:|
+| Model   |   Sequence | Prove time | Verify | Proof size |                    Throughput |
+| ------- | ---------: | ---------: | -----: | ---------: | ----------------------------: |
 | GPT-2   | 512 tokens |    7.6 min |  1.3 s |   10.7 MiB | 1.12 tokens/s (67 tokens/min) |
 | Gemma 3 | 512 tokens |     19 min |  4.3 s |     27 MiB | 0.45 tokens/s (27 tokens/min) |
 
@@ -31,14 +31,14 @@ For the full methodology and a deeper benchmark sweep across sequence lengths an
 
 ## Repository Structure
 
-| Crate | Description |
-|-------|-------------|
-| [`zkml`](zkml/) | Core proving library — model quantization, layer implementations (MLP, CNN, transformer), and ZK proof generation/verification |
-| [`deep-prove`](deep-prove/) | Client stack — `deep-prove-worker` runs a proof generation server; `deep-prove-cli` submits proving jobs locally or to a remote proving network |
-| [`tenstore`](tenstore/) | Storage facade for persisting and retrieving tensor data; supports local and remote (S3-compatible) backends |
-| [`tenvis`](tenvis/) | Interactive CLI tool for inspecting and debugging proof data stored in tenstore |
-| [`telemetry`](telemetry/) | Shared OpenTelemetry tracing and logging setup used across all crates |
-| [`utils`](utils/) | Shared utility helpers: CSV recording, memory tracking, statistical summaries |
+| Crate                        | Description                                                                                                                                         |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`zkml`](zkml/)             | Core proving library — model quantization, layer implementations (MLP, CNN, transformer), and ZK proof generation/verification                     |
+| [`deep-prove`](deep-prove/) | Client stack —`deep-prove-worker` runs a proof generation server; `deep-prove-cli` submits proving jobs locally or to a remote proving network |
+| [`tenstore`](tenstore/)     | Storage facade for persisting and retrieving tensor data; supports local and remote (S3-compatible) backends                                        |
+| [`tenvis`](tenvis/)         | Interactive CLI tool for inspecting and debugging proof data stored in tenstore                                                                     |
+| [`telemetry`](telemetry/)   | Shared OpenTelemetry tracing and logging setup used across all crates                                                                               |
+| [`utils`](utils/)           | Shared utility helpers: CSV recording, memory tracking, statistical summaries                                                                       |
 
 ## Licensing
 
