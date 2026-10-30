@@ -1,4 +1,9 @@
-use crate::{StorageKey, StoreError, local::DiskStore, remote::RemoteStore};
+use crate::{
+    StorageKey, StoreError,
+    local::DiskStore,
+    metrics::{StoreMetrics, StoreMetricsSnapshot},
+    remote::RemoteStore,
+};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -29,6 +34,8 @@ pub struct GenStore {
     kind: GenStoreKind,
     /// Unique run ID is used to differentiate keys from distinct runs
     run_id: Uuid,
+    /// Traffic counters, shared by all clones of this store.
+    metrics: Arc<StoreMetrics>,
 }
 
 #[derive(Clone)]
@@ -64,6 +71,7 @@ impl GenStore {
         Self {
             kind,
             run_id: Uuid::new_v4(),
+            metrics: StoreMetrics::new_arc(),
         }
     }
 
@@ -71,20 +79,47 @@ impl GenStore {
         Self {
             kind: GenStoreKind::Empty,
             run_id: Uuid::new_v4(),
+            metrics: StoreMetrics::new_arc(),
         }
     }
 
+    /// Returns a handle to the traffic counters of this store. The counters
+    /// are shared by every clone, so they cover the whole run (including the
+    /// background writer thread and all hydrated handles).
+    pub fn metrics(&self) -> Arc<StoreMetrics> {
+        self.metrics.clone()
+    }
+
+    /// Convenience accessor for a snapshot of the current counters.
+    pub fn metrics_snapshot(&self) -> StoreMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    /// Zeroes all traffic counters (e.g. to measure a specific phase).
+    pub fn reset_metrics(&self) {
+        self.metrics.reset();
+    }
+
     pub fn new_temporary(cache_size: usize) -> Result<Self, StoreError> {
-        let kind = GenStoreKind::Tmp(Arc::new(Mutex::new(DiskStore::new(
-            tempfile::tempdir().unwrap(),
-            cache_size,
-        )?)));
-        Ok(Self::new_kind(kind))
+        let store = DiskStore::new(tempfile::tempdir().unwrap(), cache_size)?;
+        let metrics = StoreMetrics::new_arc();
+        let kind = GenStoreKind::Tmp(Arc::new(Mutex::new(with_metrics(store, &metrics))));
+        Ok(Self {
+            kind,
+            run_id: Uuid::new_v4(),
+            metrics,
+        })
     }
 
     pub fn new_local(root: PathBuf, cache_size: usize) -> Result<Self, StoreError> {
-        let kind = GenStoreKind::Local(Arc::new(Mutex::new(DiskStore::new(root, cache_size)?)));
-        Ok(Self::new_kind(kind))
+        let store = DiskStore::new(root, cache_size)?;
+        let metrics = StoreMetrics::new_arc();
+        let kind = GenStoreKind::Local(Arc::new(Mutex::new(with_metrics(store, &metrics))));
+        Ok(Self {
+            kind,
+            run_id: Uuid::new_v4(),
+            metrics,
+        })
     }
 
     pub fn new_remote<P>(
@@ -95,11 +130,16 @@ impl GenStore {
     where
         P: 'static + AsRef<Path> + Send,
     {
+        let metrics = StoreMetrics::new_arc();
         let kind = GenStoreKind::Remote(Arc::new(Mutex::new(
             RemoteStore::new(root, cache_size, server_addr)
                 .map_err(StoreError::RemoteStoreError)?,
         )));
-        Ok(Self::new_kind(kind))
+        Ok(Self {
+            kind,
+            run_id: Uuid::new_v4(),
+            metrics,
+        })
     }
 
     /// Create a new page of type `U` derived from `old_k` by mapping `f` on it.
@@ -194,6 +234,15 @@ impl Default for GenStore {
     }
 }
 
+/// Attach the run-level metrics to a disk store before it is wrapped in its mutex.
+fn with_metrics<P: AsRef<Path>>(
+    mut store: DiskStore<P>,
+    metrics: &Arc<StoreMetrics>,
+) -> DiskStore<P> {
+    store.set_metrics(metrics.clone());
+    store
+}
+
 impl GenericStore for GenStore {
     fn prefetch<T>(&self, storage_key: &StorageKey<T>) -> Result<(), StoreError>
     where
@@ -212,6 +261,7 @@ impl GenericStore for GenStore {
     where
         T: for<'a> Deserialize<'a>,
     {
+        self.metrics.inc_fetch();
         match &self.kind {
             GenStoreKind::Local(store) => store.lock().unwrap().fetch(self.run_id, storage_key),
             GenStoreKind::Tmp(store) => store.lock().unwrap().fetch(self.run_id, storage_key),
@@ -224,6 +274,7 @@ impl GenericStore for GenStore {
     where
         T: Serialize,
     {
+        self.metrics.inc_store_count();
         match &self.kind {
             GenStoreKind::Local(store) => {
                 store.lock().unwrap().store(self.run_id, storage_key, data)

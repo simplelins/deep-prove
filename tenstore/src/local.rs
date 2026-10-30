@@ -1,4 +1,4 @@
-use crate::{LocalStore, StorageKey, StoreError};
+use crate::{LocalStore, StorageKey, StoreError, metrics::StoreMetrics};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -8,6 +8,7 @@ use std::{
     io::{BufReader, BufWriter, Read, Write},
     num::NonZero,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use uuid::Uuid;
 use weight_lru::LruCache;
@@ -75,6 +76,9 @@ pub struct DiskStore<P> {
 
     /// The root folder of where to store the file-backing of the data.
     root: P,
+
+    /// Optional traffic counters (LRU misses / disk reads / stored bytes).
+    metrics: Option<Arc<StoreMetrics>>,
 }
 
 impl<P: AsRef<Path>> DiskStore<P> {
@@ -90,7 +94,14 @@ impl<P: AsRef<Path>> DiskStore<P> {
             storage: Default::default(),
             cache: LruCache::new(NonZero::new(max_cache_size).unwrap_or(DEFAULT_CACHE_SIZE)),
             root,
+            metrics: None,
         })
+    }
+
+    /// Attach traffic counters to this store. The counters are shared by
+    /// reference, so the same `Arc` can also be held by the owning `GenStore`.
+    pub fn set_metrics(&mut self, metrics: Arc<StoreMetrics>) {
+        self.metrics = Some(metrics);
     }
 }
 
@@ -193,7 +204,8 @@ impl<P: AsRef<Path>> DiskStore<P> {
             .and_then(|ks| ks.get(&key))
             .cloned();
         if let Some(storage) = backing {
-            let data = self.cache.try_get_or_insert(key, || {
+            let metrics = self.metrics.clone();
+            let data = self.cache.try_get_or_insert(key, move || {
                 // This is an over-allocation, as serialization will
                 // typically compress, even if slightly, the content.
                 let mut buffer = Vec::with_capacity(storage.file_size() as usize);
@@ -202,6 +214,12 @@ impl<P: AsRef<Path>> DiskStore<P> {
                 reader.read_to_end(&mut buffer).map_err(StoreError::from)?;
 
                 let buffer_len = NonZero::new(buffer.len()).ok_or(StoreError::EmptyStore)?;
+
+                // This closure only runs on an LRU miss, so it is exactly
+                // where a backing page file is read from disk.
+                if let Some(metrics) = metrics.as_ref() {
+                    metrics.inc_disk_read(buffer.len());
+                }
 
                 Ok::<_, StoreError>((buffer, buffer_len))
             })?;
@@ -214,6 +232,10 @@ impl<P: AsRef<Path>> DiskStore<P> {
 
     /// Store data under the given internal key
     fn store_bytes_internal(&mut self, key: InternalKey, data: Vec<u8>) -> Result<(), StoreError> {
+        if let Some(metrics) = self.metrics.as_ref() {
+            metrics.inc_store_bytes(data.len());
+        }
+
         let storage = self
             .storage
             .entry(key.run_id)

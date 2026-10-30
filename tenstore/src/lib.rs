@@ -8,10 +8,12 @@ use uuid::Uuid;
 
 pub use error::StoreError;
 pub use genstore::{GenStore, GenericStore};
+pub use metrics::{StoreMetrics, StoreMetricsSnapshot};
 
 mod error;
 mod genstore;
 mod local;
+mod metrics;
 mod remote;
 
 /// Identifier for storage data.

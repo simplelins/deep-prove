@@ -308,6 +308,9 @@ fn main() -> anyhow::Result<()> {
         driver.with_max_context(max_ctx);
         let user_tokens = driver.random_sequence(user_prompt);
         let input_tensor = driver.tokens_to_tensor(&user_tokens)?;
+        // the store is hoisted so its traffic counters can be attributed to
+        // each phase (trace generation vs proving) separately
+        let mut store = GenStore::default();
         let (trace, chunks) = if args.distributed {
             let (chunks, split_node_info) = prover_ctx.split_in_chunks(
                 args.num_chunks,
@@ -331,12 +334,19 @@ fn main() -> anyhow::Result<()> {
             (
                 measure::r(HEADER_INFERENCE_TIME, || {
                     info!("Running inference...");
-                    driver.run_elements(input_tensor, &mut GenStore::default())
+                    driver.run_elements(input_tensor, &mut store)
                 })?,
                 None,
             )
         };
         mem_snap("4.trace_gen");
+        if !args.distributed {
+            let snap = store.metrics_snapshot();
+            info!("Store metrics after trace generation: {snap}");
+            measure::set("store_stores_tracegen", snap.store_count);
+            measure::set("store_written_mb_tracegen", snap.store_bytes / 1024 / 1024);
+            store.reset_metrics();
+        }
 
         if args.memory {
             info!(
@@ -365,6 +375,11 @@ fn main() -> anyhow::Result<()> {
                 "prove_full_memory_peak",
                 (new_peak_rss / 1024 / 1024).to_string(),
             );
+            let snap = store.metrics_snapshot();
+            info!("Store metrics after prove: {snap}");
+            measure::set("store_fetch_prove", snap.fetch_count);
+            measure::set("store_disk_reads_prove", snap.disk_read_count);
+            measure::set("store_disk_read_mb_prove", snap.disk_read_bytes / 1024 / 1024);
 
             (proof, io)
         };
