@@ -1748,6 +1748,7 @@ impl Model<Element> {
                 prover_ctx,
                 self,
                 chunks,
+                &input_handles,
                 step_rx,
             )?;
         // model inputs must stay wet for the whole run: they feed the first

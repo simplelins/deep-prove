@@ -41,7 +41,7 @@ pub use iop::{
     ChunkProof, Proof, ProverContext,
     claim::Claim,
     prover::Prover,
-    verifier::{IO, verify},
+    verifier::{IO, verify, verify_streaming},
 };
 pub use quantization::{ScalingFactor, ScalingStrategy};
 pub use shape::Shape;

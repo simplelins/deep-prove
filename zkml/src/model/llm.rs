@@ -42,7 +42,7 @@ use crate::{
     },
     quantization::{InferenceObserver, InferenceTracker, ModelMetadata, ToElement},
     tensor::{TensorHandle, TensorTypeParam, WrappedTensor},
-    verify,
+    verify, verify_streaming,
 };
 use anyhow::{Context, anyhow, ensure};
 use ark_ff::PrimeField;
@@ -858,6 +858,35 @@ where
     where
         PCS::Commitment: PartialEq,
     {
+        self.verify_inner(proof, user_input, inference_output, VerifyMode::Classic)
+    }
+
+    /// Verification of a proof produced by [`Driver::prove_streaming`]: the
+    /// per-chunk seeds are derived from the global sequential transcript
+    /// (plan A of docs/zkml_bootcamp/K_*.md §5.2) instead of the single
+    /// shared challenge of the classic derivation.
+    pub fn verify_streaming(
+        &self,
+        proof: Proof<F, PCS>,
+        user_input: Vec<Token>,
+        inference_output: IO<F>,
+    ) -> anyhow::Result<()>
+    where
+        PCS::Commitment: PartialEq,
+    {
+        self.verify_inner(proof, user_input, inference_output, VerifyMode::Streaming)
+    }
+
+    fn verify_inner(
+        &self,
+        proof: Proof<F, PCS>,
+        user_input: Vec<Token>,
+        inference_output: IO<F>,
+        mode: VerifyMode,
+    ) -> anyhow::Result<()>
+    where
+        PCS::Commitment: PartialEq,
+    {
         let span = info_span!(
             "zkml_llm_verify",
             max_context = self.max_context.unwrap_or(self.md.config.context_length),
@@ -897,7 +926,18 @@ where
         // 1. verify the proof it self
         let prover_input = inference_output.input[0].clone();
         let prover_output = inference_output.output[0].clone();
-        verify::<_, Blake3Transcript, _>(&self.verifier_ctx, proof, inference_output)?;
+        match mode {
+            VerifyMode::Classic => {
+                verify::<_, Blake3Transcript, _>(&self.verifier_ctx, proof, inference_output)?
+            }
+            VerifyMode::Streaming => {
+                verify_streaming::<_, Blake3Transcript, _>(
+                    &self.verifier_ctx,
+                    proof,
+                    inference_output,
+                )?
+            }
+        }
         // 2. verify the sequentiality of the output: from the first newly generated token to the last
         // but without including the padding.
         // output is [seq_len] where []
@@ -923,6 +963,16 @@ where
         }
         Ok(())
     }
+}
+
+/// Selects the challenge derivation replayed by the verifier.
+#[derive(Clone, Copy, Debug)]
+enum VerifyMode {
+    /// Single shared challenge squeezed once from the setup transcript.
+    Classic,
+    /// Global sequential transcript: setup ‖ input binding ‖ chunk count,
+    /// then each verified chunk is absorbed before deriving the next seed.
+    Streaming,
 }
 
 #[cfg(test)]
@@ -1092,9 +1142,22 @@ mod test {
             "streaming output mismatch against run_elements"
         );
 
-        // verify with the standard verifier: the proof structure is identical
-        // to the one of `chunked_prove_local`
-        verifier_ctx.verify(proof, full_sentence, io)?;
+        // verify with the streaming derivation (plan A): the verifier replays
+        // the global sequential transcript (setup ‖ input binding ‖ chunk
+        // count, then every proven chunk absorbed before the next seed)
+        verifier_ctx.verify_streaming(proof.clone(), full_sentence.clone(), io.clone())?;
+
+        // negative check: the streaming proof must NOT verify under the
+        // classic derivation (single shared challenge) — the two protocols
+        // are distinct and the seed chain actually binds the instance. The
+        // sumcheck verifier signals the mismatch by panicking, so catch it.
+        let classic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verifier_ctx.verify(proof.clone(), full_sentence.clone(), io.clone())
+        }));
+        assert!(
+            classic_result.is_err(),
+            "a streaming proof verified under the classic derivation"
+        );
         Ok(())
     }
 

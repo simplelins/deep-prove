@@ -16,6 +16,7 @@
 | 版本 | 日期 | 修订说明 |
 | --- | --- | --- |
 | 1.0 | 2026-10-30 | 首次发布：prove/verify 两侧挑战值派生点与吸收顺序审计、安全强度定量论证（ε 预算 + grinding）、流式分段影响分析、方案 A（全局串行 transcript）设计与实施要求 |
+| 1.1 | 2026-10-30 | 补充 §5.5 方案 A 实现记录：全局 transcript 域分离字符串、输入绑定/段数绑定/proven chunk 吸收的具体函数、吸收顺序 = 段完成顺序（与最终 Proof 的 Vec 顺序一致，非 chunk_id 序）、流式与经典派生的验证入口分离、负向测试 |
 
 ---
 
@@ -200,6 +201,21 @@ seed₀ = S.challenge_scalar()
 ### 5.4 与论文论证的关系
 
 论文的知识可靠性论证只依赖"每个挑战在相关承诺之后派生"（BCS 前提）+ 段间承诺绑定 + 划分检查。方案 A 的串行链是该前提的**更严格实例化**（每个挑战额外绑定全部前序承诺），不引入任何更弱的假设；其正确性论证在审计文档中随实现一并补充（§7 实施要求）。
+
+### 5.5 实现记录（v1.1，已落地）
+
+| 要素 | 实现 |
+| --- | --- |
+| 全局 transcript | `T::new(b"model_stream_proving")`（与经典 `b"model_proving"` 域分离），持有于 `StreamingProver.global_transcript`（zkml/src/iop/streaming.rs） |
+| setup 吸收 | 与经典一致：`Prover::initialise_transcript(ctx)`（absorb commitment_ctx） |
+| 输入绑定（W1） | `verifier::bind_io_inputs_to_transcript`：`b"model_inputs"` ‖ 段数 ‖ 每个输入张量的（长度 ‖ 逐元素 append_scalars）。prover 侧在 `StreamingProver::new` 对原始输入 handle 做 `tensor() → pad_next_power_of_two → to_field`（与 `to_verifier_io` 对 `trace.input` 的变换逐操作一致）；verifier 侧对 `io.input` 调同一函数 |
+| 段数绑定（W3） | `verifier::bind_chunk_count_to_transcript`：`b"model_chunks"` ‖ u64-le 段数 |
+| 段种子 | `seed_i = S.challenge_scalar()`；段 i 的 chunk transcript 仍由 `initialize_transcript_for_chunk(seed_i)` 初始化 |
+| proven chunk 吸收（W2） | `verifier::bind_proven_chunk_to_transcript`：对刚证明完的段做 `add_chunk_data_to_transcript(chunk)` ‖ `chunk_commitments.add_to_transcript(chunk_id)`，随后 `seed_{i+1} = S.challenge_scalar()` |
+| **吸收顺序** | 段的**完成顺序**（= 流水线顺序），与最终 `Proof.chunk_proofs` 的 Vec 顺序严格一致；**不是** chunk_id 序。verifier 按该 Vec 顺序重放。段自身自包含（与经典路径相同），故 Vec 无需按 chunk_id 排序 |
+| 验证入口 | `Verifier::verify_streaming` / 自由函数 `verify_streaming`（verifier.rs）；LLM 层 `LLMVerifierContext::verify_streaming`（与经典 `verify` 共享 EOS/移位业务校验，仅密码学重放路径不同）。**流式证明必须用流式验证入口**；两派生不兼容 |
+| 验收 | `test_llm_driver_streaming_prove_gpt2`：流式证明经 `verify_streaming` 通过（含移位校验）；**负向断言**：同一证明经经典 `verify` 必须失败（固化派生区分；sumcheck verifier 以 panic 报不一致，测试用 catch_unwind 捕获） |
+| 经典路径 | `verify`（单共享挑战）保持原语义；回归 `test_prover_steps_*`、`test_distribute_*` 全部通过 |
 
 ---
 

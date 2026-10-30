@@ -4,7 +4,7 @@ use crate::{
         ChunkProof, TableProof,
         chunking::{
             ChunkID, ChunkedInNode, ChunkedInput, ChunkedNode, ChunkedOutNode, ChunkedOutput,
-            SplittedIOInfo, initialize_transcript_for_chunk,
+            ChunkIOCommitments, ModelChunk, SplittedIOInfo, initialize_transcript_for_chunk,
         },
         compute_claim,
         context::ShapeStep,
@@ -12,7 +12,7 @@ use crate::{
     layers::{provable::Evaluate, split::SplitLayer},
     lookup::logup_gkr::verifier::new_verify_logup_proof_multiple_sizes,
     measure,
-    poly_commit::verifier::{CommitmentVerifier, VerifierClaim},
+    poly_commit::verifier::{CommitmentVerifier, VerifierClaim, VerifierCommitment},
     quantization::ToField,
     tensor::WrappedTensor,
 };
@@ -37,6 +37,47 @@ use std::collections::{BTreeMap, HashMap};
 use tracing::{info_span, trace};
 
 pub(crate) type SplittedIO<F> = HashMap<usize, Vec<Tensor<SerializableField<F>>>>;
+
+/// Binds the model inputs of this run into the transcript, so that the seed
+/// chain of the streaming derivation depends on the actual input values (W1
+/// of the streaming protocol audit, docs/zkml_bootcamp/K_*.md §5.2).
+///
+/// Both the prover (over the padded fieldized input handles) and the verifier
+/// (over `io.input`) must call this with the same tensors, in the same order.
+pub(crate) fn bind_io_inputs_to_transcript<F: PrimeField, T: Transcript>(
+    transcript: &mut T,
+    inputs: &[Tensor<SerializableField<F>>],
+) {
+    transcript.append_bytes(b"model_inputs");
+    transcript.append_bytes(&(inputs.len() as u64).to_le_bytes());
+    for tensor in inputs {
+        transcript.append_bytes(&(tensor.data().len() as u64).to_le_bytes());
+        let scalars: Vec<F> = tensor.data().iter().map(|s| s.to_field()).collect();
+        transcript.append_scalars(&scalars);
+    }
+}
+
+/// Binds the number of chunks of the run into the transcript (W3 of the
+/// streaming protocol audit).
+pub(crate) fn bind_chunk_count_to_transcript<T: Transcript>(transcript: &mut T, num_chunks: usize) {
+    transcript.append_bytes(b"model_chunks");
+    transcript.append_bytes(&(num_chunks as u64).to_le_bytes());
+}
+
+/// Absorbs the identity of a proven chunk (its structure and its IO
+/// commitments) into the global streaming transcript, so that the seed of the
+/// next chunk depends on all the previously proven chunks (W2 of the streaming
+/// protocol audit). The same absorption must be replayed by the verifier in
+/// the same order.
+pub(crate) fn bind_proven_chunk_to_transcript<F: PrimeField, PCS: CommitmentScheme, T: Transcript>(
+    transcript: &mut T,
+    model_chunk: &ModelChunk,
+    commitments: &ChunkIOCommitments<VerifierCommitment<PCS>>,
+) -> anyhow::Result<()> {
+    model_chunk.add_chunk_data_to_transcript(transcript)?;
+    commitments.add_to_transcript::<PCS, T>(model_chunk.chunk_id, transcript);
+    Ok(())
+}
 
 fn split_io_tensors<F: PrimeField>(
     split_io_info: &SplittedIOInfo,
@@ -586,17 +627,17 @@ impl<'a, F: PrimeField, T: Transcript, PCS: CommitmentScheme<Field = F>> Verifie
         Ok(())
     }
 
-    pub(crate) fn verify(
+    /// Shared prelude of [`Self::verify`] and [`Self::verify_streaming`]:
+    /// shape steps, chunk-partition and cross-chunk commitment consistency
+    /// checks.
+    fn prepare_verification(
         ctx: &VerifierContext<F, PCS>,
         io: &IO<F>,
-        proof: Proof<F, PCS>,
-    ) -> anyhow::Result<()>
+        proof: &Proof<F, PCS>,
+    ) -> anyhow::Result<HashMap<NodeId, ShapeStep>>
     where
         T: InitTranscript,
     {
-        let mut transcript = Self::initialise_transcript(ctx)?;
-        let verifier = Verifier::<'_, F, T, PCS>::new(&mut transcript, io);
-
         // compute padded and unpadded input shapes, using the splitted inputs/output tensors, if any
         let splitted_inputs = if let Some(splitted_inputs) = io.splitted_inputs.as_ref() {
             splitted_inputs
@@ -674,6 +715,21 @@ impl<'a, F: PrimeField, T: Transcript, PCS: CommitmentScheme<Field = F>> Verifie
                 .check_chunk_commitment_consistency::<PCS>(&chunk_commitments_by_id)
         })?;
 
+        Ok(shape_steps)
+    }
+
+    pub(crate) fn verify(
+        ctx: &VerifierContext<F, PCS>,
+        io: &IO<F>,
+        proof: Proof<F, PCS>,
+    ) -> anyhow::Result<()>
+    where
+        T: InitTranscript,
+    {
+        let mut transcript = Self::initialise_transcript(ctx)?;
+        let verifier = Verifier::<'_, F, T, PCS>::new(&mut transcript, io);
+        let shape_steps = Self::prepare_verification(ctx, io, &proof)?;
+
         // verify chunks
         // there is a distinct proof for model claims, so we need to verify each chunk
         // and then verify the model opening proof
@@ -685,6 +741,47 @@ impl<'a, F: PrimeField, T: Transcript, PCS: CommitmentScheme<Field = F>> Verifie
             let verifier = Verifier::new(&mut transcript, verifier.io);
             verifier.verify_chunk(ctx, proof, &shape_steps)
         })?;
+
+        Ok(())
+    }
+
+    /// Verification of a proof produced by the streaming prover.
+    ///
+    /// Same checks as [`Self::verify`], but the per-chunk seeds are derived
+    /// from a global sequential transcript: setup ‖ input binding ‖ chunk
+    /// count, then after each verified chunk its structure and IO commitments
+    /// are absorbed before deriving the next seed (see
+    /// docs/zkml_bootcamp/K_*.md §5.2 — plan A).
+    pub(crate) fn verify_streaming(
+        ctx: &VerifierContext<F, PCS>,
+        io: &IO<F>,
+        proof: Proof<F, PCS>,
+    ) -> anyhow::Result<()>
+    where
+        T: InitTranscript,
+    {
+        let mut transcript = Self::initialise_transcript(ctx)?;
+        let shape_steps = Self::prepare_verification(ctx, io, &proof)?;
+
+        // bind this run's input and the chunk count before deriving any seed
+        bind_io_inputs_to_transcript::<F, T>(&mut transcript, &io.input);
+        bind_chunk_count_to_transcript(&mut transcript, proof.chunk_proofs.len());
+        let mut seed: F = transcript.challenge_scalar();
+
+        for chunk_proof in proof.chunk_proofs {
+            // keep the chunk identity for the global absorption: `verify_chunk`
+            // consumes the proof (clones are structure-only, no tensor data)
+            let model_chunk = chunk_proof.chunk_data.model_chunk.clone();
+            let commitments = chunk_proof.chunk_data.commitments.clone();
+            // initialise a verifier for the given chunk with its own seed
+            let mut chunk_transcript: T = initialize_transcript_for_chunk(seed);
+            let verifier = Verifier::new(&mut chunk_transcript, io);
+            verifier.verify_chunk(ctx, chunk_proof, &shape_steps)?;
+            // absorb the verified chunk into the global transcript so that the
+            // next seed depends on all the previously proven chunks (W2)
+            bind_proven_chunk_to_transcript::<F, PCS, T>(&mut transcript, &model_chunk, &commitments)?;
+            seed = transcript.challenge_scalar();
+        }
 
         Ok(())
     }
@@ -750,6 +847,28 @@ where
     let _guard = span.enter();
     measure::r("verify_full", || {
         Verifier::<F, T, PCS>::verify(ctx, &io, proof)
+    })
+}
+
+/// Verification of a streaming proof: same checks as [`verify`], with the
+/// per-chunk seeds derived from the global sequential transcript (plan A of
+/// docs/zkml_bootcamp/K_*.md §5.2).
+pub fn verify_streaming<F, T: Transcript + InitTranscript, PCS: CommitmentScheme<Field = F>>(
+    ctx: &VerifierContext<F, PCS>,
+    proof: Proof<F, PCS>,
+    io: IO<F>,
+) -> anyhow::Result<()>
+where
+    F: PrimeField,
+{
+    let span = info_span!(
+        "zkml_verify_proof_streaming",
+        inputs = io.input.len(),
+        outputs = io.output.len()
+    );
+    let _guard = span.enter();
+    measure::r("verify_full_streaming", || {
+        Verifier::<F, T, PCS>::verify_streaming(ctx, &io, proof)
     })
 }
 

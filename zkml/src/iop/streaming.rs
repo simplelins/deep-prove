@@ -36,9 +36,14 @@ use crate::{
         ChunkProof, ProverContext,
         chunking::{ChunkID, ModelChunk, initialize_transcript_for_chunk},
         prover::Prover,
-        verifier::IO,
+        verifier::{
+            IO, bind_chunk_count_to_transcript, bind_io_inputs_to_transcript,
+            bind_proven_chunk_to_transcript,
+        },
     },
     model::{Model, ToStorageKey, Trace, trace::Step},
+    quantization::ToField,
+    tensor::TensorHandle,
 };
 
 /// Stack size for the dedicated proving thread.
@@ -85,8 +90,14 @@ where
     steps: HashMap<ChunkID, HashMap<NodeId, Step<Element>>>,
     /// Step tap receiver.
     step_rx: Receiver<(NodeId, Step<Element>)>,
-    /// The common challenge shared by all chunk transcripts.
-    challenge: F,
+    /// Global sequential transcript of the run (plan A of the streaming
+    /// protocol audit): absorbs the setup, the model input binding and the
+    /// chunk count before deriving the first seed, then the identity of every
+    /// proven chunk before deriving the next seed. Verifier counterpart:
+    /// `Verifier::verify_streaming`.
+    global_transcript: T,
+    /// Seed of the transcript of the chunk currently being proven.
+    current_seed: F,
     /// Completed proofs, in completion order.
     proofs: Vec<(ChunkID, ChunkProof<F, PCS>)>,
     /// The transcript type is only used to derive the common challenge.
@@ -100,7 +111,14 @@ where
     PCS: CommitmentScheme<Field = F> + 'static,
 {
     /// Builds the streaming plan from precomputed chunks and derives the
-    /// common challenge the same way the chunked prover's split node does.
+    /// first chunk seed from the global sequential transcript:
+    /// `setup ‖ input binding ‖ chunk count` (plan A of the streaming
+    /// protocol audit, docs/zkml_bootcamp/K_*.md §5.2).
+    ///
+    /// `input_handles` are the raw model input handles (they must still be
+    /// wet); they are padded and fieldized exactly like `to_verifier_io` does,
+    /// so that the prover-side input binding matches the verifier-side one
+    /// over `io.input`.
     ///
     /// Returns the coordinator and the storage keys of the model inputs, which
     /// the run loop must pin for the whole run (they are needed wet at the end
@@ -109,6 +127,7 @@ where
         ctx: &'ctx ProverContext<'a, F, PCS>,
         model: &'a Model<Element>,
         chunks: Vec<ModelChunk>,
+        input_handles: &[TensorHandle<Element>],
         step_rx: Receiver<(NodeId, Step<Element>)>,
     ) -> anyhow::Result<(Self, Vec<StorageKey<Vec<Element>>>)> {
         let mut remaining = HashMap::new();
@@ -143,8 +162,21 @@ where
             .map(|id| id.output_at(0).to_storage_key())
             .collect();
 
-        let mut transcript = Prover::<F, T, PCS>::initialise_transcript(ctx)?;
-        let challenge = transcript.challenge_scalar();
+        let mut global_transcript = Prover::<F, T, PCS>::initialise_transcript(ctx)?;
+        // bind this run's model input (W1): the padded fieldized inputs, the
+        // same transformation `to_verifier_io` applies to `trace.input`
+        let bound_inputs = input_handles
+            .iter()
+            .map(|handle| {
+                let tensor_guard = handle.tensor()?;
+                let padded = (*tensor_guard).pad_next_power_of_two();
+                Ok(padded.to_field())
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        bind_io_inputs_to_transcript::<F, T>(&mut global_transcript, &bound_inputs);
+        // bind the number of chunks (W3)
+        bind_chunk_count_to_transcript(&mut global_transcript, chunks.len());
+        let current_seed = global_transcript.challenge_scalar();
 
         Ok((
             Self {
@@ -156,7 +188,8 @@ where
                 chunk_keys,
                 steps: HashMap::new(),
                 step_rx,
-                challenge,
+                global_transcript,
+                current_seed,
                 proofs: Vec::new(),
                 _phantom: PhantomData,
             },
@@ -230,7 +263,7 @@ where
             ..Default::default()
         };
         let chunk_layers = chunk.chunk_layers(self.model);
-        let challenge = self.challenge;
+        let seed = self.current_seed;
         let ctx = self.ctx;
         // prove on a dedicated thread with an explicit stack: the prove
         // recursion needs more stack than the caller's thread may provide
@@ -241,7 +274,7 @@ where
                 std::thread::Builder::new()
                     .stack_size(PROVE_THREAD_STACK_SIZE)
                     .spawn_scoped(scope, move || {
-                        let mut transcript: T = initialize_transcript_for_chunk(challenge);
+                        let mut transcript: T = initialize_transcript_for_chunk(seed);
                         let prover = Prover::new(ctx, &mut transcript);
                         prover.prove_chunk(chunk, &chunk_trace, &chunk_layers)
                     })
@@ -250,6 +283,17 @@ where
                     .expect("Proving thread panicked")
             })
         })?;
+        // absorb the proven chunk identity into the global transcript and
+        // derive the seed of the next chunk (W2): the chunk's structure and
+        // its IO commitments are exactly what the verifier replays
+        let model_chunk = proof.chunk_data.model_chunk.clone();
+        let commitments = proof.chunk_data.commitments.clone();
+        bind_proven_chunk_to_transcript::<F, PCS, T>(
+            &mut self.global_transcript,
+            &model_chunk,
+            &commitments,
+        )?;
+        self.current_seed = self.global_transcript.challenge_scalar();
         self.proofs.push((chunk_id, proof));
         Ok(Some(chunk_id))
     }
@@ -269,7 +313,12 @@ where
             missing.is_empty(),
             "Cannot finalize streaming proof: incomplete chunks {missing:?}"
         );
-        self.proofs.sort_by_key(|(id, _)| *id);
+        // NOTE: the proofs are kept in **completion order**: it is the order
+        // in which the chunks were absorbed into the global transcript, and
+        // the streaming verifier replays the absorption in exactly this
+        // (Vec) order to derive the same seed chain. Chunks are
+        // self-contained, so — just like for the classic chunked prover — no
+        // chunk-id ordering is required.
         let proofs = self
             .proofs
             .into_iter()
