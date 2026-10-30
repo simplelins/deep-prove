@@ -13,7 +13,8 @@ use timed_core::Output;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 use zkml::{
-    ProverContext,
+    Element, Number, ProverContext, Shape, Tensor,
+    iop::streaming::StreamingMode,
     measure::{self, Measure},
     model::{
         exec_graph::InferenceEngine,
@@ -23,7 +24,7 @@ use zkml::{
         file_cache,
         gguf::RawGGUF,
         llm::{
-            HFTokenizer,
+            HFTokenizer, Token,
             models::{gemma3::Gemma3, gpt2::GPT2, llama2::Llama2},
             tokenizer::TokenizerLoader,
         },
@@ -135,6 +136,24 @@ struct LLMArgs {
 
     #[arg(long, requires = "distributed")]
     num_chunks: Option<usize>,
+
+    /// Use the streaming segmented prover: the trace is proven segment by
+    /// segment while it is generated, in memory (no disk round-trip). The
+    /// generation runs twice in this mode for now (the reference
+    /// `run_elements` pass provides the model-generated sentence), so compare
+    /// the `streaming_prove_full` timing, not the total.
+    #[arg(long, default_value_t = false)]
+    streaming: bool,
+
+    /// Memory budget per streaming segment, in MB (default 512).
+    #[arg(long, default_value_t = 512, requires = "streaming")]
+    stream_budget_mb: usize,
+
+    /// Streaming window: max number of completed-but-unproven segments kept
+    /// in memory. 1 = pipeline with minimal memory; a larger window lets the
+    /// proving thread overlap more with generation.
+    #[arg(long, default_value_t = 2, requires = "streaming")]
+    stream_window: usize,
 
     /// Measure layer-wise metrics
     #[arg(long, default_value_t = false)]
@@ -355,9 +374,65 @@ fn main() -> anyhow::Result<()> {
             );
             utils::track::flame_graph_enable();
         }
+        let mut full_sentence_tokens: Option<Vec<Token>> = None;
         let (proof, io) = if args.distributed {
             info!("Running distributed proving locally...");
             distributed::run_distributed(trace, &driver, &prover_ctx, chunks.unwrap())?
+        } else if args.streaming {
+            mem_snap("5a.prove_before");
+            let peak_rss = peak_rss_bytes();
+            // the reference trace's input is the model-generated sentence:
+            // exactly what the streaming prove must run over (its shift check
+            // requires the greedy predictions to match the next tokens)
+            let sentence_elements: Vec<Element> =
+                trace.inputs()[0].tensor()?.data().to_vec();
+            let full_sentence_tensor = Tensor::new(
+                Shape::new(vec![sentence_elements.len()]),
+                sentence_elements,
+            )?;
+            full_sentence_tokens = Some(
+                full_sentence_tensor
+                    .data()
+                    .iter()
+                    .map(|t| Token::from(t.to_usize()))
+                    .collect(),
+            );
+            info!(
+                "Running streaming proving locally over {} tokens (budget {} MB, window {})...",
+                full_sentence_tensor.data().len(),
+                args.stream_budget_mb,
+                args.stream_window
+            );
+            let mode = StreamingMode::Pipeline {
+                window: args.stream_window,
+            };
+            let (stream_trace, proof, io) = measure::r("streaming_prove_full", || {
+                driver.prove_streaming(
+                    &prover_ctx,
+                    full_sentence_tensor,
+                    args.stream_budget_mb * 1024 * 1024,
+                    mode,
+                    &mut store,
+                )
+            })?;
+            mem_snap("5b.prove_after");
+            let new_peak_rss = peak_rss_bytes();
+            measure::set(
+                "prove_full_memory_peak",
+                (new_peak_rss / 1024 / 1024).to_string(),
+            );
+            let snap = store.metrics_snapshot();
+            info!("Store metrics after streaming prove: {snap}");
+            measure::set("store_fetch_prove", snap.fetch_count);
+            measure::set("store_disk_reads_prove", snap.disk_read_count);
+            measure::set("store_disk_read_mb_prove", snap.disk_read_bytes / 1024 / 1024);
+            let (trace_elements, trace_bytes) = stream_trace.element_volume();
+            info!(
+                "Streaming trace volume: {trace_elements} elements ({:.1} MB i64)",
+                trace_bytes as f64 / 1e6
+            );
+
+            (proof, io)
         } else {
             mem_snap("5a.prove_before");
             let peak_rss = peak_rss_bytes();
@@ -392,14 +467,26 @@ fn main() -> anyhow::Result<()> {
 
         verifier_ctx = verifier_ctx.with_max_context(max_ctx);
         info!("Verifying proof...");
-        verifier_ctx
-            .verify(proof, user_tokens, io)
-            .expect("invalid proof");
+        if let Some(full_tokens) = full_sentence_tokens {
+            // streaming proofs must be verified with the streaming derivation
+            verifier_ctx
+                .verify_streaming(proof, full_tokens, io)
+                .expect("invalid streaming proof");
+        } else {
+            verifier_ctx.verify(proof, user_tokens, io).expect("invalid proof");
+        }
         mem_snap("6.verify");
         mem_dump();
         if !args.distributed {
             measure::post_process(|metrics| {
-                let Ok(proof_time) = metrics.get("prove_full").unwrap().parse::<usize>() else {
+                // the classic path records `prove_full`; the streaming path
+                // records `streaming_prove_full` (which already includes the
+                // overlapped generation + proving of the fused run)
+                let proof_time = metrics
+                    .get("prove_full")
+                    .or_else(|| metrics.get("streaming_prove_full"))
+                    .and_then(|s| s.parse::<usize>().ok());
+                let Some(proof_time) = proof_time else {
                     return;
                 };
                 let Ok(ctx_length) = metrics.get(HEADER_MAX_CONTEXT).unwrap().parse::<usize>()

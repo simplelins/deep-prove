@@ -810,11 +810,17 @@ impl Driver<Element> {
     /// verifiable by the same verifier as `Self::prove`.
     ///
     /// Returns the full trace as well, for instrumentation and assertions.
+    ///
+    /// `mode` selects how the completed segments are proven: `Sync` blocks
+    /// the generation until each segment's proof is done (minimal memory);
+    /// `Pipeline { window }` proves on a resident thread while the generation
+    /// continues, with `window` bounding the pending segments in memory.
     pub fn prove_streaming<F, PCS>(
         &self,
         ctx: &ProverContext<F, PCS>,
         input_tensor: Tensor<Element>,
         budget_bytes: usize,
+        mode: crate::iop::streaming::StreamingMode,
         store: &mut GenStore,
     ) -> anyhow::Result<(Trace<Element>, Proof<F, PCS>, IO<F>)>
     where
@@ -840,6 +846,7 @@ impl Driver<Element> {
             store,
             ctx,
             chunks,
+            mode,
         )
     }
 }
@@ -1114,8 +1121,13 @@ mod test {
             .iter()
             .map(|t| Token::from(t.to_usize()))
             .collect();
-        let (trace, proof, io) =
-            driver.prove_streaming(&prover_ctx, input_tensor, budget_bytes, &mut store)?;
+        let (trace, proof, io) = driver.prove_streaming(
+            &prover_ctx,
+            input_tensor,
+            budget_bytes,
+            crate::iop::streaming::StreamingMode::Pipeline { window: 2 },
+            &mut store,
+        )?;
 
         let metrics = store.metrics_snapshot();
         info!("Streaming prove store metrics: {metrics}");

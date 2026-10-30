@@ -347,7 +347,7 @@ impl Trace<Element> {
     ///
     /// Used by instrumentation logging to report trace data d before
     /// fieldization / batch commitment.
-    pub(crate) fn element_volume(&self) -> (usize, usize) {
+    pub fn element_volume(&self) -> (usize, usize) {
         let mut elements = 0usize;
         for step in self.steps.values() {
             if let Ok(inputs) = step.input_tensors() {

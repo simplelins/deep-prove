@@ -1710,6 +1710,11 @@ impl Model<Element> {
     /// The returned proof has exactly the same structure as the one produced
     /// by `Prover::chunked_prove_local` over the same chunking, and is
     /// verified by the same verifier.
+    ///
+    /// `mode` selects how the completed segments are proven: `Sync` proves
+    /// each one inline (minimal memory, no overlap), `Pipeline { window }`
+    /// proves on a resident thread while the run keeps generating, with the
+    /// window bounding the number of completed-but-unproven segments.
     #[allow(clippy::type_complexity)]
     pub fn run_and_prove_streaming<'ctx, F, T, PCS>(
         &self,
@@ -1717,10 +1722,11 @@ impl Model<Element> {
         store: &mut GenStore,
         prover_ctx: &'ctx crate::ProverContext<F, PCS>,
         chunks: Vec<crate::iop::chunking::ModelChunk>,
+        mode: crate::iop::streaming::StreamingMode,
     ) -> Result<(Trace<Element>, crate::Proof<F, PCS>, crate::IO<F>)>
     where
         F: ark_ff::PrimeField,
-        T: crate::InitTranscript + dp_crypto::arkyper::transcript::Transcript,
+        T: crate::InitTranscript + dp_crypto::arkyper::transcript::Transcript + Send + 'static,
         PCS: dp_crypto::arkyper::CommitmentScheme<Field = F> + 'static,
     {
         let span = info_span!(
@@ -1730,75 +1736,85 @@ impl Model<Element> {
         );
         let _guard = span.enter();
 
-        let input_handles = tensor_to_handles(&inputs, &self.graph, store)?;
-        let (step_tx, step_rx) = mpsc::channel();
+        // the whole run lives in a scope so that the pipeline proving thread
+        // can borrow the model and the prover context
+        std::thread::scope(|scope| {
+            let input_handles = tensor_to_handles(&inputs, &self.graph, store)?;
+            let (step_tx, step_rx) = mpsc::channel();
 
-        let runner = BaseRunner {
-            store: store.clone(),
-            split_nodes_info: None,
-        };
-        // store runner must be before trace and handle lifetime, since those
-        // can dry the tensors
-        let runner = StoreRunner::new(runner, store.clone());
-        let runner = TraceRunner::new(runner, input_handles.clone()).with_step_tap(step_tx);
-        let mut runner = HandleLifetimeRunner::new(runner, &self.graph);
+            let runner = BaseRunner {
+                store: store.clone(),
+                split_nodes_info: None,
+            };
+            // store runner must be before trace and handle lifetime, since those
+            // can dry the tensors
+            let runner = StoreRunner::new(runner, store.clone());
+            let runner = TraceRunner::new(runner, input_handles.clone()).with_step_tap(step_tx);
+            let mut runner = HandleLifetimeRunner::new(runner, &self.graph);
 
-        let (mut coordinator, model_input_keys) =
-            crate::iop::streaming::StreamingProver::<F, T, PCS>::new(
-                prover_ctx,
-                self,
-                chunks,
-                &input_handles,
-                step_rx,
-            )?;
-        // model inputs must stay wet for the whole run: they feed the first
-        // chunk and, at the end, the verifier IO
-        runner.pin_keys(model_input_keys);
+            let (mut coordinator, model_input_keys) =
+                crate::iop::streaming::StreamingProver::<F, T, PCS>::new(
+                    prover_ctx,
+                    self,
+                    chunks,
+                    &input_handles,
+                    step_rx,
+                    scope,
+                    mode,
+                )?;
+            // model inputs must stay wet for the whole run: they feed the first
+            // chunk and, at the end, the verifier IO
+            runner.pin_keys(model_input_keys);
 
-        // forward pass with per-chunk pinning and synchronous proving
-        let input_handles = input_handles
-            .into_iter()
-            .map(|handle| handle.wrapped_tensor_variant())
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        runner.model_inputs(&self.graph, &input_handles)?;
-        let mut current_chunk: Option<crate::iop::chunking::ChunkID> = None;
-        for (node_id, layer) in self.graph.forward_inners() {
-            let layer_span = info_span!(
-                "zkml_layer_run",
-                node_id = %node_id,
-                op = layer.as_kind_str()
-            );
-            let _layer_guard = layer_span.enter();
-            // pin the chunk's tensors before its first node runs, so that
-            // tensors consumed inside the chunk are not dried before the
-            // chunk's proof reads them
-            if let Some(chunk_id) = coordinator.chunk_of(&node_id)
-                && current_chunk != Some(chunk_id)
-            {
-                let keys = coordinator.keys_to_pin(chunk_id).to_vec();
-                runner.pin_keys(keys);
-                current_chunk = Some(chunk_id);
+            // forward pass with per-chunk pinning and proving
+            let input_handles = input_handles
+                .into_iter()
+                .map(|handle| handle.wrapped_tensor_variant())
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            runner.model_inputs(&self.graph, &input_handles)?;
+            let mut current_chunk: Option<crate::iop::chunking::ChunkID> = None;
+            for (node_id, layer) in self.graph.forward_inners() {
+                let layer_span = info_span!(
+                    "zkml_layer_run",
+                    node_id = %node_id,
+                    op = layer.as_kind_str()
+                );
+                let _layer_guard = layer_span.enter();
+                // pin the chunk's tensors before its first node runs, so that
+                // tensors consumed inside the chunk are not dried before the
+                // chunk's proof reads them
+                if let Some(chunk_id) = coordinator.chunk_of(&node_id)
+                    && current_chunk != Some(chunk_id)
+                {
+                    let keys = coordinator.keys_to_pin(chunk_id).to_vec();
+                    runner.pin_keys(keys);
+                    current_chunk = Some(chunk_id);
+                }
+                runner
+                    .run_layer(node_id, &self.graph, layer, &())
+                    .with_context(|| {
+                        format!(
+                            "Error occurred at node ID: {node_id}, Operation: {}",
+                            layer.as_kind_str()
+                        )
+                    })?;
+                coordinator.ingest_steps();
+                let mut released = coordinator.on_node_complete(&node_id)?;
+                // in pipeline mode, the proofs completed on the proving
+                // thread notify their release asynchronously
+                released.extend(coordinator.take_released());
+                for chunk_id in released {
+                    // the chunk's proof is done: its tensors can be dried
+                    let keys = coordinator.keys_to_pin(chunk_id).to_vec();
+                    runner.release_pins(keys)?;
+                }
             }
-            runner
-                .run_layer(node_id, &self.graph, layer, &())
-                .with_context(|| {
-                    format!(
-                        "Error occurred at node ID: {node_id}, Operation: {}",
-                        layer.as_kind_str()
-                    )
-                })?;
-            coordinator.ingest_steps();
-            if let Some(chunk_id) = coordinator.on_node_complete(&node_id)? {
-                // the chunk's proof is done: its tensors can be dried
-                let keys = coordinator.keys_to_pin(chunk_id).to_vec();
-                runner.release_pins(keys)?;
-            }
-        }
 
-        let trace_runner = runner.into_inner();
-        let (_store_runner, trace) = trace_runner.into_parts()?;
-        let (proof, io) = coordinator.finish(&trace)?;
-        Ok((trace, proof, io))
+            let trace_runner = runner.into_inner();
+            let (_store_runner, trace) = trace_runner.into_parts()?;
+            let (proof, io) = coordinator.finish(&trace)?;
+            Ok((trace, proof, io))
+        })
     }
 }
 
