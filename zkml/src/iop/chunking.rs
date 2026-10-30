@@ -1710,6 +1710,11 @@ fn compute_unpadded_output_shapes<F: PrimeField>(
 pub struct LLMChunkingStrategy {
     // A cache of the unpadded shapes for the outputs of all nodes in the model
     unpadded_shapes: HashMap<NodeOutput, Shape>,
+    /// When set, einsum/logits are never split horizontally: every chunk is a
+    /// set of consecutive whole nodes. This is required by the streaming prover,
+    /// whose chunk trace extraction cannot handle `SplittedNodes` yet.
+    #[serde(default)]
+    disable_horizontal_split: bool,
 }
 
 impl LLMChunkingStrategy {
@@ -1718,12 +1723,114 @@ impl LLMChunkingStrategy {
         Self::new_from_input_shape(model_unpadded_input_shapes, model)
     }
 
+    /// A strategy that only cuts the graph vertically (at whole nodes), never
+    /// splitting single layers horizontally. Required by the streaming prover.
+    pub fn new_vertical_only<F: PrimeField>(input_length: usize, model: &ModelCtx<F>) -> Self {
+        Self {
+            disable_horizontal_split: true,
+            ..Self::new(input_length, model)
+        }
+    }
+
+    /// Estimated trace volume of each inner node, in i64 elements (unpadded
+    /// shapes). The volume of a node is the total elements of its output
+    /// tensors, times an op-specific factor accounting for the proving data
+    /// stored alongside the outputs (lookup tables, shift tensors, layer
+    /// statistics). Inputs are not counted: they are accounted as outputs of
+    /// the producing node (or as model inputs, charged to the first chunk).
+    pub fn node_trace_volumes<F: PrimeField>(&self, model: &ModelCtx<F>) -> HashMap<NodeId, usize> {
+        model
+            .nodes
+            .forward_inners()
+            .map(|(node_id, node)| {
+                // ops carrying proving data alongside their outputs store
+                // (at least) one extra tensor of comparable size
+                let proving_factor = match node {
+                    LayerCtx::Softmax(_)
+                    | LayerCtx::LayerNorm(_)
+                    | LayerCtx::RMSNorm(_)
+                    | LayerCtx::Logits(_) => 2,
+                    _ => 1,
+                };
+                let out_elements: usize = self
+                    .unpadded_shapes
+                    .iter()
+                    .filter(|(out, _)| out.node_id() == node_id)
+                    .map(|(_, shape)| shape.numel())
+                    .sum();
+                (node_id, out_elements * proving_factor)
+            })
+            .collect()
+    }
+
+    /// Number of chunks such that the trace volume of each chunk stays within
+    /// `budget_bytes`. The LLM strategy reserves one chunk for the final
+    /// Logits + projection nodes and one for the embedding nodes; the
+    /// remaining "stream" nodes are distributed so that each chunk holds
+    /// about `budget_bytes` of trace data (i64, unpadded).
+    ///
+    /// Returns the `num_chunks` to feed to [`ChunkingStrategy::split`]. If a
+    /// single node's volume exceeds the budget, a warning is emitted: closing
+    /// the gap requires horizontal splitting (not yet supported in streaming).
+    pub fn num_chunks_for_budget<F: PrimeField>(
+        &self,
+        budget_bytes: usize,
+        model: &ModelCtx<F>,
+    ) -> anyhow::Result<usize> {
+        ensure!(budget_bytes > 0, "Chunk volume budget must be positive");
+        let volumes = self.node_trace_volumes(model);
+        let (logits_id, einsum_id) = Self::get_last_logits_and_final_projection_nodes(
+            &mut model
+                .nodes
+                .backward_iter()
+                .filter(|(_, node)| node.is_inner()),
+        )?;
+        // nodes the LLM strategy reserves into their own chunks
+        let reserved: HashSet<NodeId> = HashSet::from_iter([logits_id, einsum_id]);
+        let stream_elements: usize = volumes
+            .iter()
+            .filter(|(id, _)| !reserved.contains(id))
+            .map(|(_, v)| *v)
+            .sum();
+        if let Some((id, max_node)) = volumes.iter().max_by_key(|(_, v)| *v) {
+            let max_bytes = max_node.saturating_mul(size_of::<Element>());
+            if max_bytes > budget_bytes {
+                warn!(
+                    "Node {id} has an estimated trace volume of {max_bytes} bytes, \
+                     above the {} bytes chunk budget: it will form an oversize chunk. \
+                     Horizontal splitting (streaming phase 2) is required to enforce \
+                     the budget.",
+                    budget_bytes
+                );
+            }
+        }
+        let reserved_bytes: usize = reserved
+            .iter()
+            .filter_map(|id| volumes.get(id))
+            .sum::<usize>()
+            .saturating_mul(size_of::<Element>());
+        if reserved_bytes > budget_bytes {
+            warn!(
+                "The Logits + projection chunk has an estimated volume of {reserved_bytes} bytes, \
+                 above the {budget_bytes} bytes chunk budget"
+            );
+        }
+        let budget_elements = (budget_bytes / size_of::<Element>()).max(1);
+        // the strategy reserves 2 extra chunks (logits+projection, embeddings)
+        // when the total is >= 3, so the stream gets `num_chunks - 2` chunks
+        let num_stream_chunks = stream_elements.div_ceil(budget_elements).max(1);
+        Ok(num_stream_chunks + 2)
+    }
+
     fn new_from_input_shape<F: PrimeField>(
         model_unpadded_input_shapes: Vec<Shape>,
         model: &ModelCtx<F>,
     ) -> Self {
         let unpadded_shapes = compute_unpadded_output_shapes(&model_unpadded_input_shapes, model);
-        Self { unpadded_shapes }
+        Self {
+            unpadded_shapes,
+            disable_horizontal_split: false,
+        }
     }
 
     fn add_nodes<'a, F: PrimeField>(
@@ -1818,15 +1925,22 @@ impl ChunkingStrategy for LLMChunkingStrategy {
         // hence, the ideal number of chunks is `num_add_nodes + 2`
         let num_add_nodes = self.add_nodes(model).count();
         // compute number of horizontal chunks for Logits and Einsum
-        let (logits_node_id, einsum_node_id) = Self::get_last_logits_and_final_projection_nodes(
-            &mut model
-                .nodes
-                .backward_iter()
-                .filter(|(_, node)| node.is_inner()),
-        )
-        .expect("Last nodes in LLM are not Logits and Einsum");
-        let num_extra_chunks = self
-            .num_ideal_chunks_for_logits_and_final_projection(logits_node_id, einsum_node_id, model)
+        let num_extra_chunks = if self.disable_horizontal_split {
+            // logits and einsum form a single vertical chunk
+            1
+        } else {
+            let (logits_node_id, einsum_node_id) = Self::get_last_logits_and_final_projection_nodes(
+                &mut model
+                    .nodes
+                    .backward_iter()
+                    .filter(|(_, node)| node.is_inner()),
+            )
+            .expect("Last nodes in LLM are not Logits and Einsum");
+            self.num_ideal_chunks_for_logits_and_final_projection(
+                logits_node_id,
+                einsum_node_id,
+                model,
+            )
             .and_then(|max_num_chunks_for_group| {
                 compute_num_chunks_for_group(
                     [einsum_node_id, logits_node_id].iter(),
@@ -1836,8 +1950,9 @@ impl ChunkingStrategy for LLMChunkingStrategy {
                 )
                 .transpose()
             })
-            .unwrap_or(Ok(1))?; // if logits and einsum cannot be horizontally split, we consider only 1 extra vertical 
-        // chunk for these 2 layers
+            .unwrap_or(Ok(1))? // if logits and einsum cannot be horizontally split, we consider only 1 extra vertical 
+            // chunk for these 2 layers
+        };
         Ok(num_add_nodes + 1 + num_extra_chunks + 1) // for embedding chunk
     }
 
@@ -1926,11 +2041,17 @@ impl ChunkingStrategy for LLMChunkingStrategy {
                 ideal_horizontal_chunks / FRACTION_FOR_MIN_HORIZONTAL_CHUNKS;
             // the number of horizontal chunks to be employed for logits and einsum is thus `min_horizontal_chunks`,
             // unless the number of available chunks is less than `min_horizontal chunks`
-            let mut num_horizontal_chunks = min_horizontal_chunks.min(num_available_chunks);
+            let mut num_horizontal_chunks = if self.disable_horizontal_split {
+                0
+            } else {
+                min_horizontal_chunks.min(num_available_chunks)
+            };
             // now check whether we can fit all the remaining vertical chunks into the available chunks; indeed, if
             // that's the case, we want to use more horizontal chunks than `min_horizontal_chunks`, up to `ideal_horizontal_chunks`
             let remaining_vertical_chunks = num_add_nodes + 1 - min_vertical_chunks;
-            if num_available_chunks - num_horizontal_chunks > remaining_vertical_chunks {
+            if !self.disable_horizontal_split
+                && num_available_chunks - num_horizontal_chunks > remaining_vertical_chunks
+            {
                 // we can simply set `num_horizontal_chunks` to `num_available_chunks - remaining_vertical_chunks`,
                 // up to `ideal_horizontal_chunks`
                 num_horizontal_chunks =

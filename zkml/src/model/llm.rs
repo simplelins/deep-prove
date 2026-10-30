@@ -794,6 +794,54 @@ impl Driver<Element> {
             (),
         )
     }
+
+    /// Runs the model once over `input_tensor` and proves the trace segment by
+    /// segment, as the segments are generated (streaming prove).
+    ///
+    /// `input_tensor` must be the **full generated sentence** (as produced by
+    /// the token-generation loop of `run_elements`, whose heavy run this method
+    /// fuses proving into): the verifier's shift check requires the greedy
+    /// predictions to match the actual next tokens.
+    ///
+    /// The model is split into vertical segments such that each segment's
+    /// estimated trace volume stays within `budget_bytes`; every segment is
+    /// proven in memory as soon as it is complete (its tensors are never read
+    /// back from disk) and all segment proofs are merged into one final proof,
+    /// verifiable by the same verifier as `Self::prove`.
+    ///
+    /// Returns the full trace as well, for instrumentation and assertions.
+    pub fn prove_streaming<F, PCS>(
+        &self,
+        ctx: &ProverContext<F, PCS>,
+        input_tensor: Tensor<Element>,
+        budget_bytes: usize,
+        store: &mut GenStore,
+    ) -> anyhow::Result<(Trace<Element>, Proof<F, PCS>, IO<F>)>
+    where
+        F: PrimeField,
+        PCS: CommitmentScheme<Field = F> + 'static,
+    {
+        let span = info_span!(
+            "zkml_llm_prove_streaming",
+            budget_bytes = budget_bytes,
+            max_context = self.max_context.unwrap_or_default()
+        );
+        let _entered = span.enter();
+        let input_length = input_tensor.data().len();
+        let strategy = LLMChunkingStrategy::new_vertical_only(input_length, &ctx.model_ctx);
+        let num_chunks = strategy.num_chunks_for_budget(budget_bytes, &ctx.model_ctx)?;
+        info!(
+            "Streaming prove: splitting the model in {num_chunks} chunks for a {} bytes budget",
+            budget_bytes
+        );
+        let (chunks, _split_info) = ctx.split_in_chunks(Some(num_chunks), strategy)?;
+        self.model.run_and_prove_streaming::<F, Blake3Transcript, PCS>(
+            vec![input_tensor],
+            store,
+            ctx,
+            chunks,
+        )
+    }
 }
 
 impl<F, PCS> LLMVerifierContext<F, PCS>
@@ -880,7 +928,7 @@ where
 #[cfg(test)]
 mod test {
     use crate::{
-        Number, init_test_logging,
+        Element, Number, Shape, Tensor, init_test_logging,
         iop::{ProverContext, chunking::LLMChunkingStrategy},
         model::{
             llm::{Driver, LLMVerifierContext, WithMaxContext},
@@ -960,6 +1008,94 @@ mod test {
     #[test]
     fn test_llm_driver_distributed_prove_gpt2() -> anyhow::Result<()> {
         test_llm_driver_generic_prove_gpt2::<true>()
+    }
+
+    /// Streaming segmented prove: the model runs once over the full sentence
+    /// while each segment is proven in memory as soon as it is complete; the
+    /// segment proofs are merged into a final proof verified by the standard
+    /// verifier. Asserts that the prove never had to read back tensor data
+    /// from the disk store (all reads were served by the in-memory pins).
+    #[test]
+    fn test_llm_driver_streaming_prove_gpt2() -> anyhow::Result<()> {
+        const MAX_CONTEXT: usize = 10;
+        init_test_logging("debug");
+
+        let raw = RawSafeTensors::from_hugging_face_cached("openai-community/gpt2")?;
+        let (driver, _metadata) =
+            Driver::load_from_model(GPT2::new(), &raw, Some(MAX_CONTEXT))?
+                .into_provable_llm(None)?;
+
+        let (prover_ctx, verifier_ctx) = driver.context::<F, Pcs>()?.with_max_context(MAX_CONTEXT);
+
+        let mut store = GenStore::default();
+        let sentence = "The sky is";
+        let tokenizer = GPT2::new().load_tokenizer(&raw)?;
+        let user_tokens = tokenizer.tokenize(sentence);
+
+        // First, generate the full sentence with the standard path: the LLM
+        // shift check requires the proved input to be the model-generated
+        // sentence (the greedy predictions must match the actual next tokens).
+        let mut ref_store = GenStore::default();
+        let prompt_tensor = driver.tokens_to_tensor(&user_tokens)?;
+        let reference_trace = driver.run_elements(prompt_tensor, &mut ref_store)?;
+        let reference_output: Vec<Token> = reference_trace.outputs()[0]
+            .tensor()?
+            .data()
+            .iter()
+            .map(|t| Token::from(t.to_usize()))
+            .collect();
+
+        // Streaming segmented prove over the full generated sentence: 32 MB
+        // per segment is small enough to force several segments on this model.
+        // The input tensor is built directly (same as the heavy run of
+        // `run_elements`), as `tokens_to_tensor` enforces a stricter bound.
+        let budget_bytes = 32 * 1024 * 1024;
+        let sentence_elements: Vec<Element> = reference_trace.inputs()[0]
+            .tensor()?
+            .data()
+            .iter()
+            .map(|t: &Element| *t)
+            .collect();
+        let input_tensor = Tensor::new(
+            Shape::new(vec![sentence_elements.len()]),
+            sentence_elements.clone(),
+        )?;
+        let full_sentence: Vec<Token> = sentence_elements
+            .iter()
+            .map(|t| Token::from(t.to_usize()))
+            .collect();
+        let (trace, proof, io) =
+            driver.prove_streaming(&prover_ctx, input_tensor, budget_bytes, &mut store)?;
+
+        let metrics = store.metrics_snapshot();
+        info!("Streaming prove store metrics: {metrics}");
+        assert!(
+            metrics.no_disk_reads(),
+            "streaming prove read tensor data from disk: {metrics}"
+        );
+
+        let (trace_elements, trace_bytes) = trace.element_volume();
+        info!(
+            "Streaming trace volume: {trace_elements} elements ({:.1} MB)",
+            trace_bytes as f64 / 1e6
+        );
+
+        // the streaming inference must match the standard path exactly
+        let streaming_output: Vec<Token> = trace.outputs()[0]
+            .tensor()?
+            .data()
+            .iter()
+            .map(|t| Token::from(t.to_usize()))
+            .collect();
+        assert_eq!(
+            streaming_output, reference_output,
+            "streaming output mismatch against run_elements"
+        );
+
+        // verify with the standard verifier: the proof structure is identical
+        // to the one of `chunked_prove_local`
+        verifier_ctx.verify(proof, full_sentence, io)?;
+        Ok(())
     }
 
     #[test]

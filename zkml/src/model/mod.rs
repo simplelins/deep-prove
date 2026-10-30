@@ -800,6 +800,10 @@ where
     inner: I,
     trace: Trace<N>,
     model_output_handles: BTreeMap<usize, TensorHandle<N>>,
+    /// Optional tap for the streaming prover: every recorded step is cloned
+    /// into it, so the streaming coordinator can assemble the chunk
+    /// sub-traces while the run progresses.
+    step_tap: Option<mpsc::Sender<(NodeId, Step<N>)>>,
 }
 
 impl<I, N> TraceRunner<I, N>
@@ -811,7 +815,14 @@ where
             inner,
             trace: Trace::new(input_handles.clone()),
             model_output_handles: BTreeMap::new(),
+            step_tap: None,
         }
+    }
+
+    /// Sets a tap receiving every recorded (node id, step) pair.
+    fn with_step_tap(mut self, tap: mpsc::Sender<(NodeId, Step<N>)>) -> Self {
+        self.step_tap = Some(tap);
+        self
     }
 
     /// Consumes this runner and returns its parts.
@@ -872,6 +883,11 @@ where
             mem::replace(&mut layer_out.proving_data, ProvingHandle::None),
         )?;
         for (node_id, step) in trace_steps {
+            if let Some(tap) = &self.step_tap {
+                // a full channel must never stall the run: the streaming
+                // coordinator drains it after every node
+                let _ = tap.send((node_id, step.clone()));
+            }
             self.trace.new_step(node_id, step);
         }
 
@@ -906,6 +922,11 @@ where
     inner: I,
     storagekey_to_handle: HashMap<StorageKey<Vec<N>>, TensorHandle<N>>,
     handle_usage_count: HashMap<StorageKey<Vec<N>>, usize>,
+    /// Pin counts of tensors whose in-memory copies must survive their usage
+    /// count hitting zero, because a pending streaming chunk proof still has
+    /// to read them. A tensor is dried only when both its usage count and its
+    /// pin count are zero.
+    pin_counts: HashMap<StorageKey<Vec<N>>, usize>,
 }
 
 impl<I, N> HandleLifetimeRunner<I, N>
@@ -951,7 +972,49 @@ where
             inner,
             storagekey_to_handle: HashMap::new(),
             handle_usage_count,
+            pin_counts: HashMap::new(),
         }
+    }
+
+    /// Pins the given storage keys: their in-memory copies will not be dried
+    /// (even when their usage count reaches zero) until one [`Self::release_pins`]
+    /// call per pin is issued. Used by the streaming prover to keep the
+    /// tensors of pending chunk proofs wet. Keys may refer to tensors that do
+    /// not exist yet (e.g. outputs of layers that have not run): the pin is
+    /// registered anyway and consulted when the tensor is produced.
+    pub fn pin_keys(&mut self, keys: impl IntoIterator<Item = StorageKey<Vec<N>>>) {
+        for key in keys {
+            self.pin_counts.entry(key).and_modify(|c| *c += 1).or_insert(1);
+        }
+    }
+
+    /// Releases one pin per given key. A tensor whose usage count and pin
+    /// count are both zero after the release is dried immediately.
+    pub fn release_pins(
+        &mut self,
+        keys: impl IntoIterator<Item = StorageKey<Vec<N>>>,
+    ) -> Result<()> {
+        for key in keys {
+            let Some(count) = self.pin_counts.get_mut(&key) else {
+                bail!("Releasing a pin for {key} which was never pinned");
+            };
+            *count -= 1;
+            if *count == 0 {
+                self.pin_counts.remove(&key);
+            }
+            let uses = self.handle_usage_count.get(&key).copied().unwrap_or(0);
+            if uses == 0 && !self.pin_counts.contains_key(&key) {
+                if let Ok(handle) = self.get_by_storage_key(&key) {
+                    handle.dry();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the given key has any active pin.
+    fn is_pinned(&self, key: &StorageKey<Vec<N>>) -> bool {
+        self.pin_counts.contains_key(key)
     }
 
     /// Returns the model's outputs handles.
@@ -1027,7 +1090,7 @@ where
                 .unwrap_or_default();
 
             // edge case: the input is not used by any layers
-            if uses == 0 {
+            if uses == 0 && !self.is_pinned(handle.storage_key()) {
                 warn!("Unused input tensor");
                 handle.dry();
             }
@@ -1074,7 +1137,7 @@ where
                 .and_modify(|curr| *curr -= 1)
                 .or_default();
 
-            if *uses == 0 {
+            if *uses == 0 && !self.is_pinned(&storage_key) {
                 self.get_by_storage_key(&storage_key)?.dry();
             }
         }
@@ -1086,7 +1149,7 @@ where
                 .cloned()
                 .unwrap_or_default();
 
-            if uses == 0 {
+            if uses == 0 && !self.is_pinned(handle.storage_key()) {
                 warn!("Unused output tensor");
                 handle.dry();
             }
@@ -1630,6 +1693,111 @@ where
         Layer<N>: Evaluate<N>,
     {
         self.run_with_split_nodes_info(inputs, store, None)
+    }
+}
+
+impl Model<Element> {
+    /// Runs the model while proving it segment by segment (streaming prove).
+    ///
+    /// `chunks` must be computed before the run, from the graph structure and
+    /// the input shape only (see `LLMChunkingStrategy::new_vertical_only`,
+    /// `LLMChunkingStrategy::num_chunks_for_budget` and
+    /// `ProverContext::split_in_chunks`). Each chunk is proven as soon as all
+    /// its nodes have been executed; its tensors are pinned in memory until
+    /// its proof completes and released right after, so the peak memory is
+    /// bounded by the largest chunk instead of the whole trace.
+    ///
+    /// The returned proof has exactly the same structure as the one produced
+    /// by `Prover::chunked_prove_local` over the same chunking, and is
+    /// verified by the same verifier.
+    #[allow(clippy::type_complexity)]
+    pub fn run_and_prove_streaming<'ctx, F, T, PCS>(
+        &self,
+        inputs: Vec<Tensor<Element>>,
+        store: &mut GenStore,
+        prover_ctx: &'ctx crate::ProverContext<F, PCS>,
+        chunks: Vec<crate::iop::chunking::ModelChunk>,
+    ) -> Result<(Trace<Element>, crate::Proof<F, PCS>, crate::IO<F>)>
+    where
+        F: ark_ff::PrimeField,
+        T: crate::InitTranscript + dp_crypto::arkyper::transcript::Transcript,
+        PCS: dp_crypto::arkyper::CommitmentScheme<Field = F> + 'static,
+    {
+        let span = info_span!(
+            "zkml_model_run_streaming",
+            inputs = inputs.len(),
+            chunks = chunks.len()
+        );
+        let _guard = span.enter();
+
+        let input_handles = tensor_to_handles(&inputs, &self.graph, store)?;
+        let (step_tx, step_rx) = mpsc::channel();
+
+        let runner = BaseRunner {
+            store: store.clone(),
+            split_nodes_info: None,
+        };
+        // store runner must be before trace and handle lifetime, since those
+        // can dry the tensors
+        let runner = StoreRunner::new(runner, store.clone());
+        let runner = TraceRunner::new(runner, input_handles.clone()).with_step_tap(step_tx);
+        let mut runner = HandleLifetimeRunner::new(runner, &self.graph);
+
+        let (mut coordinator, model_input_keys) =
+            crate::iop::streaming::StreamingProver::<F, T, PCS>::new(
+                prover_ctx,
+                self,
+                chunks,
+                step_rx,
+            )?;
+        // model inputs must stay wet for the whole run: they feed the first
+        // chunk and, at the end, the verifier IO
+        runner.pin_keys(model_input_keys);
+
+        // forward pass with per-chunk pinning and synchronous proving
+        let input_handles = input_handles
+            .into_iter()
+            .map(|handle| handle.wrapped_tensor_variant())
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        runner.model_inputs(&self.graph, &input_handles)?;
+        let mut current_chunk: Option<crate::iop::chunking::ChunkID> = None;
+        for (node_id, layer) in self.graph.forward_inners() {
+            let layer_span = info_span!(
+                "zkml_layer_run",
+                node_id = %node_id,
+                op = layer.as_kind_str()
+            );
+            let _layer_guard = layer_span.enter();
+            // pin the chunk's tensors before its first node runs, so that
+            // tensors consumed inside the chunk are not dried before the
+            // chunk's proof reads them
+            if let Some(chunk_id) = coordinator.chunk_of(&node_id)
+                && current_chunk != Some(chunk_id)
+            {
+                let keys = coordinator.keys_to_pin(chunk_id).to_vec();
+                runner.pin_keys(keys);
+                current_chunk = Some(chunk_id);
+            }
+            runner
+                .run_layer(node_id, &self.graph, layer, &())
+                .with_context(|| {
+                    format!(
+                        "Error occurred at node ID: {node_id}, Operation: {}",
+                        layer.as_kind_str()
+                    )
+                })?;
+            coordinator.ingest_steps();
+            if let Some(chunk_id) = coordinator.on_node_complete(&node_id)? {
+                // the chunk's proof is done: its tensors can be dried
+                let keys = coordinator.keys_to_pin(chunk_id).to_vec();
+                runner.release_pins(keys)?;
+            }
+        }
+
+        let trace_runner = runner.into_inner();
+        let (_store_runner, trace) = trace_runner.into_parts()?;
+        let (proof, io) = coordinator.finish(&trace)?;
+        Ok((trace, proof, io))
     }
 }
 
