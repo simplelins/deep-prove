@@ -1,6 +1,7 @@
 use crate::{
     StorageKey, StoreError,
     local::DiskStore,
+    memory::MemoryStore,
     metrics::{StoreMetrics, StoreMetricsSnapshot},
     remote::RemoteStore,
 };
@@ -51,6 +52,11 @@ pub enum GenStoreKind {
     /// A remote store combined with a local-store for caching.
     Remote(Arc<Mutex<RemoteStore>>),
 
+    /// A purely in-memory store: no disk backing at all. Used by the
+    /// streaming prove path to skip the write-behind disk round-trip; pages
+    /// cannot be recovered once every in-memory copy is dropped.
+    Memory(Arc<Mutex<MemoryStore>>),
+
     /// An empty store
     Empty,
 }
@@ -61,6 +67,7 @@ impl std::fmt::Debug for GenStoreKind {
             GenStoreKind::Local(mutex) => write!(f, "{:?}", mutex.lock().unwrap()),
             GenStoreKind::Tmp(mutex) => write!(f, "{:?}", mutex.lock().unwrap()),
             GenStoreKind::Remote(mutex) => write!(f, "{:?}", mutex.lock().unwrap()),
+            GenStoreKind::Memory(mutex) => write!(f, "{:?}", mutex.lock().unwrap()),
             GenStoreKind::Empty => write!(f, "GenStore::Empty"),
         }
     }
@@ -142,6 +149,19 @@ impl GenStore {
         })
     }
 
+    /// A purely in-memory store (no disk backing): pages live in a
+    /// process-local map. See [`GenStoreKind::Memory`].
+    pub fn new_memory() -> Self {
+        let store = MemoryStore::new();
+        let metrics = StoreMetrics::new_arc();
+        let kind = GenStoreKind::Memory(Arc::new(Mutex::new(with_metrics_mem(store, &metrics))));
+        Self {
+            kind,
+            run_id: Uuid::new_v4(),
+            metrics,
+        }
+    }
+
     /// Create a new page of type `U` derived from `old_k` by mapping `f` on it.
     /// If it already exists, do nothing.
     pub fn cast<T, U, F>(
@@ -194,6 +214,9 @@ impl GenStore {
             GenStoreKind::Tmp(store) => {
                 store.lock().unwrap().clean_up(self.run_id)?;
             }
+            GenStoreKind::Memory(store) => {
+                store.lock().unwrap().clean_up(self.run_id)?;
+            }
             GenStoreKind::Empty => panic!("Cant call cleanup on empty store"),
         }
         Ok(())
@@ -243,13 +266,20 @@ fn with_metrics<P: AsRef<Path>>(
     store
 }
 
+/// Same as [`with_metrics`] for the in-memory store.
+fn with_metrics_mem(mut store: MemoryStore, metrics: &Arc<StoreMetrics>) -> MemoryStore {
+    store.set_metrics(metrics.clone());
+    store
+}
+
 impl GenericStore for GenStore {
     fn prefetch<T>(&self, storage_key: &StorageKey<T>) -> Result<(), StoreError>
     where
         T: for<'a> Deserialize<'a>,
     {
         match &self.kind {
-            GenStoreKind::Local(_) | GenStoreKind::Tmp(_) | GenStoreKind::Empty => {
+            GenStoreKind::Local(_) | GenStoreKind::Tmp(_) | GenStoreKind::Memory(_)
+            | GenStoreKind::Empty => {
                 // No-op
                 Ok(())
             }
@@ -266,6 +296,7 @@ impl GenericStore for GenStore {
             GenStoreKind::Local(store) => store.lock().unwrap().fetch(self.run_id, storage_key),
             GenStoreKind::Tmp(store) => store.lock().unwrap().fetch(self.run_id, storage_key),
             GenStoreKind::Remote(store) => store.lock().unwrap().fetch(self.run_id, storage_key),
+            GenStoreKind::Memory(store) => store.lock().unwrap().fetch(self.run_id, storage_key),
             GenStoreKind::Empty => panic!("Cant call fetch on empty store"),
         }
     }
@@ -283,6 +314,7 @@ impl GenericStore for GenStore {
             GenStoreKind::Remote(store) => {
                 store.lock().unwrap().store(self.run_id, storage_key, data)
             }
+            GenStoreKind::Memory(store) => store.lock().unwrap().store(self.run_id, storage_key, data),
             GenStoreKind::Empty => panic!("Cant call store on empty store"),
         }
     }

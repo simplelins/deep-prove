@@ -13,6 +13,7 @@ pub use metrics::{StoreMetrics, StoreMetricsSnapshot};
 mod error;
 mod genstore;
 mod local;
+mod memory;
 mod metrics;
 mod remote;
 

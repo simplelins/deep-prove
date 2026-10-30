@@ -155,6 +155,12 @@ struct LLMArgs {
     #[arg(long, default_value_t = 2, requires = "streaming")]
     stream_window: usize,
 
+    /// Use the purely in-memory store (no disk backing at all): skips the
+    /// write-behind disk round-trip of the safety-net store. Pages cannot be
+    /// recovered once every in-memory copy is dropped.
+    #[arg(long, default_value_t = false)]
+    memory_store: bool,
+
     /// Measure layer-wise metrics
     #[arg(long, default_value_t = false)]
     measure_layerwise: bool,
@@ -329,7 +335,11 @@ fn main() -> anyhow::Result<()> {
         let input_tensor = driver.tokens_to_tensor(&user_tokens)?;
         // the store is hoisted so its traffic counters can be attributed to
         // each phase (trace generation vs proving) separately
-        let mut store = GenStore::default();
+        let mut store = if args.memory_store {
+            GenStore::new_memory()
+        } else {
+            GenStore::default()
+        };
         let (trace, chunks) = if args.distributed {
             let (chunks, split_node_info) = prover_ctx.split_in_chunks(
                 args.num_chunks,
