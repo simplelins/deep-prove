@@ -1,0 +1,97 @@
+[package]
+name = "dp-crypto"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ark-bn254 = { version = "0.5.0", features = ["std"] }
+ark-std = { version = "0.5.0", features = ["std","getrandom"] }
+ark-ec = { version = "0.5.0", features = ["std"] }
+ark-ff = { version = "0.5.0", features = ["std"] }
+ark-poly = { version = "0.5.0", features = ["std"]}
+anyhow = "^1.0"
+blake3 = "^1.8"
+tracing = "^0.1"
+rayon = "^1.11"
+ark-serialize = { version = "^0.5", features = ["derive"] }
+ark-poly-commit = "^0.5"
+rand_chacha = "^0.3"
+itertools = "0.14.0"
+serde = {version = "^1.0", features = ["derive", "rc"]}
+num-bigint = "0.4.6"
+either = { version = "1.15.0", features = ["serde"] }
+thiserror = "^2.0"
+proc-macro2 = "^1"
+quote = "^1"
+divan = "^0.1"
+syn = { version = "^2", features = ["full"] }
+sumcheck_macro = { path = "../sumcheck_macro" }
+sumcheck = { git = "https://github.com/Lagrange-Labs/gkr-backend.git", branch = "deep-prove-extra-features", optional = true }
+multilinear_extensions = { git = "https://github.com/Lagrange-Labs/gkr-backend.git", branch = "deep-prove-extra-features", optional = true }
+mpcs = { git = "https://github.com/Lagrange-Labs/gkr-backend.git", branch = "deep-prove-extra-features", optional = true }
+ff_ext = { git = "https://github.com/Lagrange-Labs/gkr-backend.git", branch = "deep-prove-extra-features", optional = true }
+transcript = { git = "https://github.com/Lagrange-Labs/gkr-backend.git", branch = "deep-prove-extra-features", optional = true }
+witness = { git = "https://github.com/Lagrange-Labs/gkr-backend.git", branch = "deep-prove-extra-features", optional = true }
+p3 = { git = "https://github.com/Lagrange-Labs/gkr-backend.git", branch = "deep-prove-extra-features", optional = true }
+expander-arith = { git = "https://github.com/nicholas-mainardi/Expander.git", branch = "feat/make_mpi_dependency_optional", package = "arith", features = ["halo2_asm"], optional = true }
+expander-poly = { git = "https://github.com/nicholas-mainardi/Expander.git", branch = "feat/make_mpi_dependency_optional", package = "polynomials", optional = true }
+expander-hasher = { git = "https://github.com/nicholas-mainardi/Expander.git", branch = "feat/make_mpi_dependency_optional", package = "gkr_hashers", optional = true }
+expander-sumcheck = { git = "https://github.com/nicholas-mainardi/Expander.git", branch = "feat/make_mpi_dependency_optional", package = "sumcheck_generic", optional = true }
+ec-gpu = { git = "https://github.com/Lagrange-Labs/ec-gpu", branch = "feat/hkzg_gpu", features = ["arkworks"], optional = true }
+ec-gpu-gen = { git = "https://github.com/Lagrange-Labs/ec-gpu", branch = "feat/hkzg_gpu", features = ["arkworks"], optional = true }
+
+[build-dependencies]
+ec-gpu = { git = "https://github.com/Lagrange-Labs/ec-gpu", branch = "feat/hkzg_gpu", features = ["arkworks"], optional = true }
+ec-gpu-gen = { git = "https://github.com/Lagrange-Labs/ec-gpu", branch = "feat/hkzg_gpu", features = ["arkworks"], optional = true }
+ark-bn254 = { workspace = true }
+
+[features]
+default = ["mono"]
+parallel = [
+    "ark-ec/parallel",
+    "ark-ff/parallel",
+    "ark-poly/parallel",
+    "ark-std/parallel",
+    "asm",
+]
+nightly-benches = ["parallel", "dep:sumcheck", "dep:multilinear_extensions", "dep:mpcs", "dep:ff_ext", "dep:transcript", "dep:witness", "dep:p3", "dep:expander-arith", "dep:expander-poly", "dep:expander-hasher", "dep:expander-sumcheck" ]
+all-stable = ["mono", "parallel"]
+asm = ["ark-ff/asm"]
+mono = []
+cuda = ["dep:ec-gpu", "dep:ec-gpu-gen", "ec-gpu-gen/cuda"]
+opencl = ["dep:ec-gpu", "dep:ec-gpu-gen", "ec-gpu-gen/opencl"]
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"]}
+env_logger = "0.11.8"
+rstest = "0.26.1"
+serde_json = "^1.0"
+ark-sumcheck = { git = "https://github.com/eigmax/sumcheck.git", features = ["std", "parallel"] }
+hyperplonk = { git = "https://github.com/alireza-shirzad/hyperplonk.git", features = ["parallel"], package = "subroutines" }
+hyper-arith = { git = "https://github.com/alireza-shirzad/hyperplonk.git", features = ["parallel"], package = "arithmetic" }
+jolt-core = { git = "https://github.com/a16z/jolt" }
+rmp-serde = "1.3.0"
+
+[[bench]]
+harness = false
+name = "devirgo_sumcheck"
+
+[[bench]]
+harness = false
+name = "eq"
+
+[[bench]]
+name = "dense"
+harness = false
+
+[[bench]]
+name = "sumcheck"
+harness = false
+
+[[bench]]
+name = "pcs"
+harness = false
+
+[[example]]
+name = "hyperkzg_gpu"
+required-features = ["cuda"]

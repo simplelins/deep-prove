@@ -1,0 +1,38 @@
+[workspace]
+members = [
+  "dp-crypto",
+  "sumcheck_macro",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+readme = "README.md"
+
+[workspace.dependencies]
+itertools = "0.14.0"
+ark-std = { version = "0.5.0", features = ["std","getrandom"]}
+dp-crypto = { path = "dp-crypto" }
+ark-ff = { version = "0.5.0", features = ["std"] }
+ark-bn254 = { version = "0.5.0", features = ["std"]}
+ark-ec = { version = "0.5.0", features = ["std"]}
+sumcheck_macro = { path = "sumcheck_macro" }
+ec-gpu = { git = "https://github.com/Lagrange-Labs/ec-gpu", branch = "feat/hkzg_gpu", features = ["arkworks"] }
+ec-gpu-gen = { git = "https://github.com/Lagrange-Labs/ec-gpu", branch = "feat/hkzg_gpu", features = ["arkworks"] }
+
+
+[patch.crates-io]
+#ark-ff = { git = "https://github.com/a16z/arkworks-algebra", rev = "5ebdb178" }
+#ark-ec = { git = "https://github.com/a16z/arkworks-algebra", rev = "5ebdb178" }
+#ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", rev = "5ebdb178" }
+#ark-poly = { git = "https://github.com/a16z/arkworks-algebra", rev = "5ebdb178" }
+
+ark-bn254 = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-ec = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+ark-poly = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twist-shout" }
+allocative = { git = "https://github.com/facebookexperimental/allocative", rev = "85b773d85d526d068ce94724ff7a7b81203fc95e" }
+
+
