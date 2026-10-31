@@ -217,12 +217,26 @@ impl ModelLoader<RawSafeTensors> for Gemma3 {
         let num_groups = cfg
             .get::<usize, _>("num_key_value_heads")
             .context("num_key_value_heads not found")?;
-        let raw_spans = cfg
-            .get::<Vec<String>, _>("layer_types")
-            .context("layer_types not found")?;
         let sliding_window = cfg
             .get::<usize, _>("sliding_window")
             .context("sliding_window not found")?;
+        // Older gemma-3 configs lack the `layer_types` field: fall back to the
+        // Gemma-3 architecture default, 5 sliding-attention layers followed by
+        // 1 full-attention layer (i.e. every 6th layer, starting at index 5,
+        // is full) — the same pattern the newer configs spell out.
+        let raw_spans: Vec<String> = cfg
+            .get::<Vec<String>, _>("layer_types")
+            .unwrap_or_else(|| {
+                (0..num_block)
+                    .map(|i| {
+                        if i % 6 == 5 {
+                            "full_attention".to_string()
+                        } else {
+                            "sliding_attention".to_string()
+                        }
+                    })
+                    .collect()
+            });
         let spans = raw_spans
             .iter()
             .map(|s| {

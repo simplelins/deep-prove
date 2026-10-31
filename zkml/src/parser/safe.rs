@@ -143,6 +143,25 @@ impl RawSafeTensors {
             file_cache::from_cache(&rel_index)?
         };
 
+        // Detect git-lfs pointer files (a model "present" on disk but never
+        // actually downloaded): they are tiny text files starting with
+        // `version https://git-lfs.github.com/spec/v1`, and would otherwise
+        // fail later with a confusing parser error.
+        for path in [&model, tokenizer_path.as_path(), config_path.as_path()] {
+            let mut magic = [0u8; 8];
+            if let Ok(mut f) = std::fs::File::open(&path) {
+                use std::io::Read;
+                if f.read_exact(&mut magic).is_ok()
+                    && &magic == b"version "
+                {
+                    anyhow::bail!(
+                        "{} is a git-lfs pointer file, not real weights:                          fetch the actual file (e.g. `git lfs pull`) and retry",
+                        path.display()
+                    );
+                }
+            }
+        }
+
         Ok(Self::new(model, tokenizer, config))
     }
 
