@@ -3511,7 +3511,6 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dp-crypto"
 version = "0.1.0"
-source = "git+https://github.com/Lagrange-Labs/dp-crypto.git?branch=feat%2Fhkzg_gpu#22e8e93cd0f94a7638616a1ae22190feb0a6b275"
 dependencies = [
  "anyhow",
  "ark-bn254",
@@ -8135,10 +8134,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "sumcheck_macro"
-version = "0.1.0"
-source = "git+https://github.com/Lagrange-Labs/dp-crypto.git?branch=feat%2Fhkzg_gpu#22e8e93cd0f94a7638616a1ae22190feb0a6b275"
+version = "2.0.1"
 dependencies = [
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.117",

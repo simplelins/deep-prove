@@ -98,3 +98,7 @@ ark-poly = { git = "https://github.com/a16z/arkworks-algebra", branch = "dev/twi
 [workspace.metadata.release]
 pre-release-hook = ["sh", "../.github/changelog.sh"]
 publish = false
+
+[patch."https://github.com/Lagrange-Labs/dp-crypto.git"]
+dp-crypto = { path = "vendor/dp-crypto-src/dp-crypto" }
+sumcheck_macro = { path = "vendor/dp-crypto-src/sumcheck_macro" }

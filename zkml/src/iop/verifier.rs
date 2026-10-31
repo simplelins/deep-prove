@@ -768,15 +768,39 @@ impl<'a, F: PrimeField, T: Transcript, PCS: CommitmentScheme<Field = F>> Verifie
         bind_chunk_count_to_transcript(&mut transcript, proof.chunk_proofs.len());
         let mut seed: F = transcript.challenge_scalar();
 
-        for chunk_proof in proof.chunk_proofs {
+        for (chunk_idx, chunk_proof) in proof.chunk_proofs.into_iter().enumerate() {
+            tracing::info!(
+                "== [verify] streaming chunk idx {chunk_idx} id {} nodes {} ==",
+                chunk_proof.chunk_data.model_chunk.chunk_id,
+                chunk_proof.chunk_data.model_chunk.subgraph.inner_nodes_count()
+            );
             // keep the chunk identity for the global absorption: `verify_chunk`
             // consumes the proof (clones are structure-only, no tensor data)
             let model_chunk = chunk_proof.chunk_data.model_chunk.clone();
             let commitments = chunk_proof.chunk_data.commitments.clone();
-            // initialise a verifier for the given chunk with its own seed
-            let mut chunk_transcript: T = initialize_transcript_for_chunk(seed);
-            let verifier = Verifier::new(&mut chunk_transcript, io);
-            verifier.verify_chunk(ctx, chunk_proof, &shape_steps)?;
+            // initialise a verifier for the given chunk with its own seed.
+            // A failing sub-proof panics inside the sumcheck verifier: catch
+            // the panic so that the failing chunk index is reported.
+            let chunk_id = chunk_proof.chunk_data.model_chunk.chunk_id;
+            let nodes = chunk_proof.chunk_data.model_chunk.subgraph.inner_nodes_count();
+            let verification = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut chunk_transcript: T = initialize_transcript_for_chunk(seed);
+                let verifier = Verifier::new(&mut chunk_transcript, io);
+                verifier.verify_chunk(ctx, chunk_proof, &shape_steps)
+            }));
+            match verification {
+                Ok(result) => result?,
+                Err(panic_payload) => {
+                    let msg = panic_payload
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "unknown panic".to_string());
+                    anyhow::bail!(
+                        "streaming verify: chunk idx {chunk_idx} (id {chunk_id}, {nodes} nodes) failed: {msg}"
+                    );
+                }
+            }
             // absorb the verified chunk into the global transcript so that the
             // next seed depends on all the previously proven chunks (W2)
             bind_proven_chunk_to_transcript::<F, PCS, T>(&mut transcript, &model_chunk, &commitments)?;

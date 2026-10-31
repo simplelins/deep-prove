@@ -1773,6 +1773,10 @@ impl Model<Element> {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             runner.model_inputs(&self.graph, &input_handles)?;
             let mut current_chunk: Option<crate::iop::chunking::ChunkID> = None;
+            let t_run_start = std::time::Instant::now();
+            let mut t_forward = std::time::Duration::ZERO;
+            let mut t_complete = std::time::Duration::ZERO;
+            let mut t_pin_release = std::time::Duration::ZERO;
             for (node_id, layer) in self.graph.forward_inners() {
                 let layer_span = info_span!(
                     "zkml_layer_run",
@@ -1790,6 +1794,7 @@ impl Model<Element> {
                     runner.pin_keys(keys);
                     current_chunk = Some(chunk_id);
                 }
+                let t0 = std::time::Instant::now();
                 runner
                     .run_layer(node_id, &self.graph, layer, &())
                     .with_context(|| {
@@ -1798,21 +1803,38 @@ impl Model<Element> {
                             layer.as_kind_str()
                         )
                     })?;
+                t_forward += t0.elapsed();
                 coordinator.ingest_steps();
+                let t1 = std::time::Instant::now();
                 let mut released = coordinator.on_node_complete(&node_id)?;
+                t_complete += t1.elapsed();
                 // in pipeline mode, the proofs completed on the proving
                 // thread notify their release asynchronously
                 released.extend(coordinator.take_released());
+                let t2 = std::time::Instant::now();
                 for chunk_id in released {
                     // the chunk's proof is done: its tensors can be dried
                     let keys = coordinator.keys_to_pin(chunk_id).to_vec();
                     runner.release_pins(keys)?;
                 }
+                t_pin_release += t2.elapsed();
             }
+            info!(
+                "== [streaming] run loop: forward={:.1}s complete_dispatch={:.1}s pin_release={:.1}s total={:.1}s ==",
+                t_forward.as_secs_f64(),
+                t_complete.as_secs_f64(),
+                t_pin_release.as_secs_f64(),
+                t_run_start.elapsed().as_secs_f64()
+            );
 
             let trace_runner = runner.into_inner();
             let (_store_runner, trace) = trace_runner.into_parts()?;
+            let t3 = std::time::Instant::now();
             let (proof, io) = coordinator.finish(&trace)?;
+            info!(
+                "== [streaming] finish (drain proofs + merge + io): {:.1}s ==",
+                t3.elapsed().as_secs_f64()
+            );
             Ok((trace, proof, io))
         })
     }

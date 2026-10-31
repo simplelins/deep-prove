@@ -4,6 +4,8 @@ use chrono::{DateTime, Local};
 use clap::{ArgGroup, Parser, ValueEnum, builder::ArgPredicate};
 #[cfg(not(feature = "cuda"))]
 use dp_crypto::arkyper::HyperKZG;
+use dp_crypto::arkyper::transcript::blake3::Blake3Transcript;
+use zkml::parser::llm::LLMTokenizer;
 #[cfg(feature = "cuda")]
 use dp_crypto::arkyper::hyperkzg_gpu::HyperKZGGpu;
 use libc::{RUSAGE_SELF, getrusage, rusage};
@@ -160,6 +162,25 @@ struct LLMArgs {
     /// recovered once every in-memory copy is dropped.
     #[arg(long, default_value_t = false)]
     memory_store: bool,
+
+    /// Fixed prompt text: skip the token-generation loop entirely and run the
+    /// streaming prove over this text directly (single forward). The LLM
+    /// shift check is skipped in this mode (the model's greedy predictions
+    /// need not match the next token of an arbitrary text); the proof is
+    /// verified with the low-level streaming verifier. Useful to benchmark
+    /// long sequences without paying the (slow, CPU) generation loop.
+    #[arg(long, requires = "streaming", conflicts_with = "distributed")]
+    prompt: Option<String>,
+
+    /// Same as --prompt, but reads the text from a file (long prompts exceed
+    /// the OS per-argument size limit).
+    #[arg(
+        long,
+        requires = "streaming",
+        conflicts_with = "distributed",
+        conflicts_with = "prompt"
+    )]
+    prompt_file: Option<String>,
 
     /// Measure layer-wise metrics
     #[arg(long, default_value_t = false)]
@@ -332,7 +353,26 @@ fn main() -> anyhow::Result<()> {
 
         driver.with_max_context(max_ctx);
         let user_tokens = driver.random_sequence(user_prompt);
-        let input_tensor = driver.tokens_to_tensor(&user_tokens)?;
+        // fixed-prompt mode: no token generation loop, the input is the
+        // (truncated) prompt text itself — a single forward will be run by
+        // the streaming prove
+        let prompt_text: Option<String> = match (&args.prompt, &args.prompt_file) {
+            (Some(text), _) => Some(text.clone()),
+            (None, Some(path)) => Some(std::fs::read_to_string(path)?),
+            (None, None) => None,
+        };
+        let fixed_input: Option<Vec<Element>> = prompt_text.as_ref().map(|text| {
+            let toks = tokeniser.tokenize(text);
+            let n = toks.len().min(max_ctx - 1);
+            toks[..n]
+                .iter()
+                .map(|t: &zkml::parser::llm::Token| t.as_tensor_type_param::<Element>())
+                .collect()
+        });
+        let input_tensor = match &fixed_input {
+            Some(elements) => Tensor::new(Shape::new(vec![elements.len()]), elements.clone())?,
+            None => driver.tokens_to_tensor(&user_tokens)?,
+        };
         // the store is hoisted so its traffic counters can be attributed to
         // each phase (trace generation vs proving) separately
         let mut store = if args.memory_store {
@@ -340,7 +380,12 @@ fn main() -> anyhow::Result<()> {
         } else {
             GenStore::default()
         };
-        let (trace, chunks) = if args.distributed {
+        // fixed-prompt mode skips the generation pass entirely (the streaming
+        // prove runs over the prompt text directly); the other paths run the
+        // reference inference whose trace feeds prove / the sentence extraction
+        let (reference_trace, chunks) = if fixed_input.is_some() {
+            (None, None)
+        } else if args.distributed {
             let (chunks, split_node_info) = prover_ctx.split_in_chunks(
                 args.num_chunks,
                 driver.chunking_strategy(&input_tensor, &prover_ctx)?,
@@ -358,16 +403,19 @@ fn main() -> anyhow::Result<()> {
                 InferenceEngine::LLM(driver) => driver,
                 _ => bail!("Expected LLM engine"),
             };
-            (trace, Some(chunks))
+            (Some(trace), Some(chunks))
         } else {
             (
-                measure::r(HEADER_INFERENCE_TIME, || {
-                    info!("Running inference...");
-                    driver.run_elements(input_tensor, &mut store)
-                })?,
+                Some(
+                    measure::r(HEADER_INFERENCE_TIME, || {
+                        info!("Running inference...");
+                        driver.run_elements(input_tensor, &mut store)
+                    })?,
+                ),
                 None,
             )
         };
+        let trace = reference_trace;
         mem_snap("4.trace_gen");
         if !args.distributed {
             let snap = store.metrics_snapshot();
@@ -387,15 +435,21 @@ fn main() -> anyhow::Result<()> {
         let mut full_sentence_tokens: Option<Vec<Token>> = None;
         let (proof, io) = if args.distributed {
             info!("Running distributed proving locally...");
-            distributed::run_distributed(trace, &driver, &prover_ctx, chunks.unwrap())?
+            distributed::run_distributed(trace.unwrap(), &driver, &prover_ctx, chunks.unwrap())?
         } else if args.streaming {
             mem_snap("5a.prove_before");
             let peak_rss = peak_rss_bytes();
-            // the reference trace's input is the model-generated sentence:
-            // exactly what the streaming prove must run over (its shift check
-            // requires the greedy predictions to match the next tokens)
-            let sentence_elements: Vec<Element> =
-                trace.inputs()[0].tensor()?.data().to_vec();
+            // the sentence to prove: the fixed prompt in prompt mode, or the
+            // model-generated sentence from the reference pass (the LLM shift
+            // check requires the greedy predictions to match the next tokens;
+            // prompt mode skips that check and uses the low-level verifier)
+            let sentence_elements: Vec<Element> = match &fixed_input {
+                Some(elements) => elements.clone(),
+                None => trace.as_ref().expect("reference trace").inputs()[0]
+                    .tensor()?
+                    .data()
+                    .to_vec(),
+            };
             let full_sentence_tensor = Tensor::new(
                 Shape::new(vec![sentence_elements.len()]),
                 sentence_elements,
@@ -447,7 +501,7 @@ fn main() -> anyhow::Result<()> {
             mem_snap("5a.prove_before");
             let peak_rss = peak_rss_bytes();
             info!("Running proving locally...");
-            let (proof, io) = driver.prove(&prover_ctx, trace)?;
+            let (proof, io) = driver.prove(&prover_ctx, trace.unwrap())?;
             mem_snap("5b.prove_after");
             let new_peak_rss = peak_rss_bytes();
             if new_peak_rss == peak_rss {
@@ -477,7 +531,17 @@ fn main() -> anyhow::Result<()> {
 
         verifier_ctx = verifier_ctx.with_max_context(max_ctx);
         info!("Verifying proof...");
-        if let Some(full_tokens) = full_sentence_tokens {
+        if fixed_input.is_some() {
+            // fixed-prompt mode: skip the LLM business checks (the model's
+            // greedy predictions need not match the next token of an
+            // arbitrary text) and verify the cryptographic proof directly
+            zkml::verify_streaming::<F, Blake3Transcript, Pcs>(
+                &verifier_ctx.verifier_ctx,
+                proof,
+                io,
+            )
+            .expect("invalid streaming proof");
+        } else if let Some(full_tokens) = full_sentence_tokens {
             // streaming proofs must be verified with the streaming derivation
             verifier_ctx
                 .verify_streaming(proof, full_tokens, io)
