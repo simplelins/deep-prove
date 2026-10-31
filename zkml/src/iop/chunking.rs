@@ -1699,6 +1699,10 @@ fn compute_unpadded_output_shapes<F: PrimeField>(
     }
     shapes
 }
+/// Default cap on the number of streaming segments (see
+/// [`LLMChunkingStrategy::num_chunks_for_budget_with_max`]).
+pub const DEFAULT_MAX_SEGMENTS: usize = 48;
+
 /// A chunking strategy specifically devoted for LLMs.
 /// It ensures that the `Add` layers don't cause multiple
 /// commitments to be produced for each chunk, which however
@@ -1777,7 +1781,25 @@ impl LLMChunkingStrategy {
         budget_bytes: usize,
         model: &ModelCtx<F>,
     ) -> anyhow::Result<usize> {
+        self.num_chunks_for_budget_with_max(budget_bytes, DEFAULT_MAX_SEGMENTS, model)
+    }
+
+    /// Same as [`Self::num_chunks_for_budget`], but caps the segment count:
+    /// each segment carries a fixed cost (transcript init, table proofs,
+    /// boundary commitments, opening) and very small budgets on large models
+    /// produce hundreds of segments whose fixed cost dominates the total
+    /// (measured: llama-2-7b s=512 with a 512MB budget → 125 segments → 14h,
+    /// of which the actual proving was a small fraction). The effective
+    /// per-segment budget is `max(budget_bytes, stream_volume / max_segments)`,
+    /// i.e. memory per segment may exceed `budget_bytes` up to the cap.
+    pub fn num_chunks_for_budget_with_max<F: PrimeField>(
+        &self,
+        budget_bytes: usize,
+        max_segments: usize,
+        model: &ModelCtx<F>,
+    ) -> anyhow::Result<usize> {
         ensure!(budget_bytes > 0, "Chunk volume budget must be positive");
+        ensure!(max_segments >= 3, "max_segments must be at least 3");
         let volumes = self.node_trace_volumes(model);
         let (logits_id, einsum_id) = Self::get_last_logits_and_final_projection_nodes(
             &mut model
@@ -1816,6 +1838,13 @@ impl LLMChunkingStrategy {
             );
         }
         let budget_elements = (budget_bytes / size_of::<Element>()).max(1);
+        // cap the segment count: with very small budgets the fixed per-segment
+        // cost dominates, so raise the effective budget instead
+        let reserved_budget_elements = (reserved_bytes / size_of::<Element>()).max(1);
+        let max_stream_chunks = max_segments.saturating_sub(2);
+        let budget_elements = budget_elements
+            .max(stream_elements.div_ceil(max_stream_chunks.max(1)))
+            .max(reserved_budget_elements.div_ceil(max_stream_chunks.max(1)).max(1));
         // the strategy reserves 2 extra chunks (logits+projection, embeddings)
         // when the total is >= 3, so the stream gets `num_chunks - 2` chunks
         let num_stream_chunks = stream_elements.div_ceil(budget_elements).max(1);

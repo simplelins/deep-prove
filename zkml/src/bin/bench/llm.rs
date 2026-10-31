@@ -157,6 +157,13 @@ struct LLMArgs {
     #[arg(long, default_value_t = 2, requires = "streaming")]
     stream_window: usize,
 
+    /// Cap on the streaming segment count: with small budgets on big models
+    /// the per-segment fixed cost (table proofs, boundary commitments)
+    /// dominates; the effective per-segment budget is raised so that at most
+    /// this many segments are produced.
+    #[arg(long, default_value_t = 48, requires = "streaming")]
+    stream_max_segments: usize,
+
     /// Use the purely in-memory store (no disk backing at all): skips the
     /// write-behind disk round-trip of the safety-net store. Pages cannot be
     /// recovered once every in-memory copy is dropped.
@@ -471,10 +478,11 @@ fn main() -> anyhow::Result<()> {
                 window: args.stream_window,
             };
             let (stream_trace, proof, io) = measure::r("streaming_prove_full", || {
-                driver.prove_streaming(
+                driver.prove_streaming_with_max_segments(
                     &prover_ctx,
                     full_sentence_tensor,
                     args.stream_budget_mb * 1024 * 1024,
+                    args.stream_max_segments,
                     mode,
                     &mut store,
                 )

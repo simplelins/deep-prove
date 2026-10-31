@@ -56,6 +56,21 @@
 
 ## 5 性能数据汇总（流式 pipeline, window=2, budget=512MB）
 
+### 5.1 llama-7b 证明性能异常（P2，待专项 profiling）
+
+后续归因运行（llama-7b s=128，13 段）揭示了**独立于流式的深层性能问题**：
+
+- **每段证明 ~90 分钟**（13 段跑了 20h+ 未完成）——**比 s=512 的每段 6.5 分钟慢 14 倍，与序列长度缩放完全相反**；
+- **证明并行度异常低**：llama 证明期间仅 ~6 核满载（401-660%），对比 gemma-270m 同路径的 2400-3400%（24-34 核）；
+- **数据正常性已排除**：layerwise CSV 显示 num_vars ≤24、最大张量 17M 元素，无病态张量；总 T_pad ≈17GB Fr，按 GPT-2 标定吞吐（61M 求值/s）理论证明时间应为 ~10 分钟量级——**实测慢 50×+**；
+- **llama-7b 的其他成本**：context 生成 30 分钟 / 峰值 200GB 内存（839 节点图 + 13GB 权重 Fr 化 + 2²⁷ max_poly_len params，`--save-params` 可持久化复用）。
+
+**影响**：经典路径同样受影响（与流式无关）——**这是 7B 级模型证明不可用的首要阻塞项**。**下一步**：对证明线程做 flamegraph（bench `--memory` 机制），定位 6 核瓶颈（候选：dp-crypto sumcheck 多 worker 的线程池配置、查表节点大表、LogUp GKR 实现的并行度）。
+
+### 5.2 已交付的自适应段预算
+
+`num_chunks_for_budget_with_max(budget, max_segments, model)`：有效段预算 = `max(budget, 流体积/max_segments)`，防止小预算在大模型上爆炸出数百段（llama-7b 512MB → 125 段 → 每段固定开销主导）。CLI：`--stream-max-segments`（默认 48）。API：`prove_streaming_with_max_segments`。
+
 | 模型 | 序列 | 段数 | 融合(生成+证明) | 峰值内存 | 磁盘读 | verify |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | gpt2 | 128 | 3 | 197s | 28 GB | 0 | 1.5s |

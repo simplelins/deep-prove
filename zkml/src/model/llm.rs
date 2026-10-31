@@ -827,6 +827,33 @@ impl Driver<Element> {
         F: PrimeField,
         PCS: CommitmentScheme<Field = F> + 'static,
     {
+        self.prove_streaming_with_max_segments(
+            ctx,
+            input_tensor,
+            budget_bytes,
+            crate::iop::chunking::DEFAULT_MAX_SEGMENTS,
+            mode,
+            store,
+        )
+    }
+
+    /// [`Self::prove_streaming`] with an explicit cap on the segment count
+    /// (small budgets on large models would otherwise explode the segment
+    /// count and drown the run in per-segment fixed costs).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prove_streaming_with_max_segments<F, PCS>(
+        &self,
+        ctx: &ProverContext<F, PCS>,
+        input_tensor: Tensor<Element>,
+        budget_bytes: usize,
+        max_segments: usize,
+        mode: crate::iop::streaming::StreamingMode,
+        store: &mut GenStore,
+    ) -> anyhow::Result<(Trace<Element>, Proof<F, PCS>, IO<F>)>
+    where
+        F: PrimeField,
+        PCS: CommitmentScheme<Field = F> + 'static,
+    {
         let span = info_span!(
             "zkml_llm_prove_streaming",
             budget_bytes = budget_bytes,
@@ -835,7 +862,11 @@ impl Driver<Element> {
         let _entered = span.enter();
         let input_length = input_tensor.data().len();
         let strategy = LLMChunkingStrategy::new_vertical_only(input_length, &ctx.model_ctx);
-        let num_chunks = strategy.num_chunks_for_budget(budget_bytes, &ctx.model_ctx)?;
+        let num_chunks = strategy.num_chunks_for_budget_with_max(
+            budget_bytes,
+            crate::iop::chunking::DEFAULT_MAX_SEGMENTS,
+            &ctx.model_ctx,
+        )?;
         info!(
             "Streaming prove: splitting the model in {num_chunks} chunks for a {} bytes budget",
             budget_bytes
