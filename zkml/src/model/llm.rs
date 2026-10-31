@@ -985,7 +985,7 @@ enum VerifyMode {
 #[cfg(test)]
 mod test {
     use crate::{
-        Element, Number, Shape, Tensor, init_test_logging,
+        Blake3Transcript, Element, Number, Shape, Tensor, init_test_logging,
         iop::{ProverContext, chunking::LLMChunkingStrategy},
         model::{
             llm::{Driver, LLMVerifierContext, WithMaxContext},
@@ -1072,6 +1072,79 @@ mod test {
     /// segment proofs are merged into a final proof verified by the standard
     /// verifier. Asserts that the prove never had to read back tensor data
     /// from the disk store (all reads were served by the in-memory pins).
+    /// Debug harness for the gemma-270m s=1024 verify mismatch: proves the
+    /// same vertical chunking of the same trace twice — once with the classic
+    /// chunked prover (+ classic verify) and once with the streaming prover
+    /// (+ streaming verify) — to tell an orchestration bug apart from a
+    /// chunking/protocol bug.
+    #[test]
+    #[ignore = "manual debug, needs gemma weights, ~30min"]
+    fn debug_gemma_s1024_streaming_vs_chunked() -> anyhow::Result<()> {
+        const MAX_CONTEXT: usize = 1024;
+        init_test_logging("debug");
+        let raw = RawSafeTensors::from_hugging_face_cached("google/gemma-3-270m-it")?;
+        let (driver, _metadata) =
+            Driver::load_from_model(Gemma3::new(), &raw, Some(MAX_CONTEXT))?
+                .into_provable_llm(None)?;
+        let (prover_ctx, verifier_ctx) =
+            driver.context::<F, Pcs>()?.with_max_context(MAX_CONTEXT);
+
+        // fixed input: 1023 tokens (arbitrary text — business checks skipped)
+        let tokens: Vec<Token> = (0..1023)
+            .map(|i| Token::from(((i * 7919) % 262144) as i64))
+            .collect();
+        let elements: Vec<Element> = tokens.iter().map(|t| t.as_number()).collect();
+        let input_tensor = Tensor::new(Shape::new(vec![elements.len()]), elements.clone())?;
+
+        let budget_bytes = 512 * 1024 * 1024;
+        let strategy =
+            LLMChunkingStrategy::new_vertical_only(elements.len(), &prover_ctx.model_ctx);
+        let num_chunks = strategy.num_chunks_for_budget(budget_bytes, &prover_ctx.model_ctx)?;
+        info!("== debug: num_chunks = {num_chunks} ==");
+
+        // --- path 1: classic chunked prove over the full trace ---
+        let mut store1 = GenStore::default();
+        let full_trace = driver.model.run(vec![input_tensor.clone()], &mut store1)?;
+        let strategy =
+            LLMChunkingStrategy::new_vertical_only(elements.len(), &prover_ctx.model_ctx);
+        let (proof1, io1) = driver.chunked_prove_local::<_, F, Pcs, crate::graph::executor::SequentialExecutor>(
+            &prover_ctx,
+            full_trace,
+            Some(num_chunks),
+            strategy,
+            (),
+        )?;
+        crate::verify::<F, Blake3Transcript, Pcs>(&verifier_ctx.verifier_ctx, proof1, io1)?;
+        info!("== debug: classic chunked prove + classic verify PASSED ==");
+
+        // --- path 2: streaming prove over the same chunking ---
+        let mut store2 = GenStore::default();
+        let (_trace2, proof2, io2) = driver.model.run_and_prove_streaming::<
+            F,
+            Blake3Transcript,
+            Pcs,
+        >(
+            vec![Tensor::new(Shape::new(vec![elements.len()]), elements.clone())?],
+            &mut store2,
+            &prover_ctx,
+            {
+                let strategy =
+                    LLMChunkingStrategy::new_vertical_only(elements.len(), &prover_ctx.model_ctx);
+                prover_ctx
+                    .split_in_chunks(Some(num_chunks), strategy)?
+                    .0
+            },
+            crate::iop::streaming::StreamingMode::Pipeline { window: 2 },
+        )?;
+        crate::verify_streaming::<F, Blake3Transcript, Pcs>(
+            &verifier_ctx.verifier_ctx,
+            proof2,
+            io2,
+        )?;
+        info!("== debug: streaming prove + streaming verify PASSED ==");
+        Ok(())
+    }
+
     #[test]
     fn test_llm_driver_streaming_prove_gpt2() -> anyhow::Result<()> {
         const MAX_CONTEXT: usize = 10;
