@@ -65,7 +65,15 @@
 - **数据正常性已排除**：layerwise CSV 显示 num_vars ≤24、最大张量 17M 元素，无病态张量；总 T_pad ≈17GB Fr，按 GPT-2 标定吞吐（61M 求值/s）理论证明时间应为 ~10 分钟量级——**实测慢 50×+**；
 - **llama-7b 的其他成本**：context 生成 30 分钟 / 峰值 200GB 内存（839 节点图 + 13GB 权重 Fr 化 + 2²⁷ max_poly_len params，`--save-params` 可持久化复用）。
 
-**影响**：经典路径同样受影响（与流式无关）——**这是 7B 级模型证明不可用的首要阻塞项**。**下一步**：对证明线程做 flamegraph（bench `--memory` 机制），定位 6 核瓶颈（候选：dp-crypto sumcheck 多 worker 的线程池配置、查表节点大表、LogUp GKR 实现的并行度）。
+**影响**：经典路径同样受影响（与流式无关）——**这是 7B 级模型证明不可用的首要阻塞项**。**✅ 已定位（perf + dwarf 采样 + 线程级 utime 对比）**：**burn ndarray 后端的 i64 matmul 是朴素单线程实现**——
+
+- perf 采样 97.8% CPU 在 `ndarray::general_mat_mul`，调用栈 `rayon scope → burn_ndarray::matmul → general_mat_mul`；
+- 线程级对比：burn matmul 主计算线程 100% 满载，rayon 池其余线程各 ~15%，证明线程 60%——**有效并行 ≈2-3 核**；
+- 根因：matrixmultiply gemm 只优化 f32/f64，**整数走朴素三重循环**，且 burn 仅对 batch 维并行（2D matmul 单线程）；
+- llama-7b 的大 2D einsum（[512,32000]×[32000,4096] 等）每个都是分钟级单线程 → 839 节点前向累积成小时级，**前向主导了"每段证明时间"**（证明线程的 sumcheck/MSM 只占小头）；
+- **与流式、与证明协议无关**——gemma-270m 快只是因为模型小、张量小。
+
+**解法**（按投入排序）：① CUDA 后端跑前向（`--features cuda`，G 文档已有 CUDA 实测 trace 生成数据）；② 给 burn-ndarray 的整型 general_mat_mul 加 rayon 行分块（fork burn 或 vendor patch，中等工作量，预期 10-30× 前向加速）；③ 量化域降宽（i32/i16，协议改动大）。
 
 ### 5.2 已交付的自适应段预算
 
