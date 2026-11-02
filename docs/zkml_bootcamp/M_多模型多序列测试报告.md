@@ -73,7 +73,20 @@
 - llama-7b 的大 2D einsum（[512,32000]×[32000,4096] 等）每个都是分钟级单线程 → 839 节点前向累积成小时级，**前向主导了"每段证明时间"**（证明线程的 sumcheck/MSM 只占小头）；
 - **与流式、与证明协议无关**——gemma-270m 快只是因为模型小、张量小。
 
-**解法**（按投入排序）：① CUDA 后端跑前向（`--features cuda`，G 文档已有 CUDA 实测 trace 生成数据）；② 给 burn-ndarray 的整型 general_mat_mul 加 rayon 行分块（fork burn 或 vendor patch，中等工作量，预期 10-30× 前向加速）；③ 量化域降宽（i32/i16，协议改动大）。
+**✅ 已修复（方案②落地）**：`WrappedTensor::matmul` 的 Rank2/Rank3 分支为 **i64 张量接入 rayon 并行 kernel**（`matmul_i64_parallel`：输出行分块 + 右操作数转置保 cache 连续；Rank3 支持 GQA 的 batch 广播），f32 路径不受影响（有优化 gemm）。正确性：朴素串行对拍单测 + 大值域无溢出单测 + llama 全链路 verify。
+
+**实测（llama-7b s=128，13 段，端到端 verify 通过）**：
+
+| 阶段 | 修复前 | 修复后 | 加速 |
+| --- | --- | --- | --- |
+| run loop forward | 20h+ 运行未完成 | **390s（6.5 分钟）** | ~20-30× |
+| 段完成+证明投递 | ~90 分钟/段 × 13 | **1922s（32 分钟）总** | **~36×** |
+| run loop 总计 | 20h+ | **2314s（38.6 分钟）** | **>30×** |
+| verify | 未到达 | **69.3s 通过** | — |
+
+streaming_prove_full 端到端 2891.6s（含 context 外的 quant 336s）；内存峰值 366GB；磁盘读 0。
+
+其余解法仍可叠加：① CUDA 后端跑前向（`--features cuda`）；③ 量化域降宽（i32/i16，协议改动大）。
 
 ### 5.2 已交付的自适应段预算
 

@@ -22,6 +22,7 @@ use super::{Element, KeyedTensor, Shape, Tensor};
 
 /// Burn tensor wrapper type with a dynamic rank
 #[derive(Debug, Clone)]
+
 pub enum WrappedTensor<T>
 where
     T: TensorTypeParam,
@@ -186,6 +187,112 @@ macro_rules! delegate_binop {
         };
         Ok(out)
     }};
+}
+
+/// Parallel integer matrix multiplication: `burn`'s ndarray backend falls
+/// back to a naive, effectively single-threaded matmul for integers
+/// (matrixmultiply only optimizes floats), which dominates the wall time of
+/// large-model inference and proving. This kernel splits the output rows
+/// over the rayon pool and keeps the inner product cache-friendly by
+/// transposing the right operand first. Exact: i64 accumulation with the
+/// same semantics as the backend's integer matmul.
+fn matmul_i64_parallel(a: &[i64], b: &[i64], m: usize, k: usize, n: usize) -> Vec<i64> {
+    use rayon::prelude::*;
+    // transpose b: bt[j*k + l] = b[l*n + j], so the inner loop of each output
+    // element walks a contiguous k-slice of bt
+    let mut bt = vec![0i64; k * n];
+    bt.par_chunks_mut(k)
+        .enumerate()
+        .for_each(|(j, row)| {
+            for (l, cell) in row.iter_mut().enumerate() {
+                *cell = b[l * n + j];
+            }
+        });
+    let mut out = vec![0i64; m * n];
+    out.par_chunks_mut(n)
+        .enumerate()
+        .for_each(|(i, row)| {
+            let a_row = &a[i * k..(i + 1) * k];
+            for (j, out_ij) in row.iter_mut().enumerate() {
+                let bt_col = &bt[j * k..(j + 1) * k];
+                let mut acc = 0i64;
+                for (a_il, &b_lj) in a_row.iter().zip(bt_col) {
+                    acc += a_il * b_lj;
+                }
+                *out_ij = acc;
+            }
+        });
+    out
+}
+
+/// Batched variant; `batch_left`/`batch_right` handle broadcast (a batch of 1
+/// is reused for every output batch).
+fn matmul_i64_parallel_batched(
+    a: &[i64], b: &[i64],
+    batches: usize, batch_left: usize, batch_right: usize,
+    m: usize, k: usize, n: usize,
+) -> Vec<i64> {
+    use rayon::prelude::*;
+    let mut out = vec![0i64; batches * m * n];
+    out.par_chunks_mut(m * n)
+        .enumerate()
+        .for_each(|(bi, out_b)| {
+            let a_off = (if batch_left == 1 { 0 } else { bi }) * m * k;
+            let b_off = (if batch_right == 1 { 0 } else { bi }) * k * n;
+            let block = matmul_i64_parallel(
+                &a[a_off..a_off + m * k],
+                &b[b_off..b_off + k * n],
+                m, k, n,
+            );
+            out_b.copy_from_slice(&block);
+        });
+    out
+}
+
+
+#[cfg(test)]
+mod matmul_i64_tests {
+    use super::matmul_i64_parallel;
+
+    fn naive(a: &[i64], b: &[i64], m: usize, k: usize, n: usize) -> Vec<i64> {
+        let mut out = vec![0i64; m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0i64;
+                for l in 0..k {
+                    acc += a[i * k + l] * b[l * n + j];
+                }
+                out[i * n + j] = acc;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn matches_naive() {
+        let cases = [(1, 1, 1), (3, 5, 7), (17, 1, 9), (1, 33, 1), (64, 64, 64), (129, 2, 65)];
+        for (m, k, n) in cases {
+            let a: Vec<i64> = (0..m * k).map(|i| (i as i64 * 7 % 101) - 50).collect();
+            let b: Vec<i64> = (0..k * n).map(|i| (i as i64 * 13 % 97) - 48).collect();
+            let fast = matmul_i64_parallel(&a, &b, m, k, n);
+            let slow = naive(&a, &b, m, k, n);
+            assert_eq!(fast, slow, "mismatch for m={m} k={k} n={n}");
+        }
+    }
+
+    #[test]
+    fn large_values_no_overflow() {
+        // quantized-domain magnitudes: ~2^23 values, k=32000 accumulation
+        let big = 1i64 << 23;
+        let m = 4; let k = 32000; let n = 3;
+        let a: Vec<i64> = (0..m * k).map(|_| big).collect();
+        let b: Vec<i64> = (0..k * n).map(|_| big).collect();
+        let fast = matmul_i64_parallel(&a, &b, m, k, n);
+        let slow = naive(&a, &b, m, k, n);
+        assert_eq!(fast, slow);
+        // no i64 overflow: 2^23 * 2^23 * 32000 < 2^63
+        assert!(fast[0] == (big as i128 * big as i128 * k as i128) as i64);
+    }
 }
 
 impl<T> WrappedTensor<T>
@@ -713,7 +820,23 @@ where
                     unpadded_shape: right_unpadded_shape,
                 },
             ) => {
-                let tensor = left.matmul(right);
+                let tensor = if std::any::TypeId::of::<T>() == std::any::TypeId::of::<i64>() {
+                    // integers: burn's matmul is a naive single-threaded
+                    // fallback, use the parallel kernel instead
+                    let (m, k) = (left.shape().dims[0], left.shape().dims[1]);
+                    let n = right.shape().dims[1];
+                    let data = matmul_i64_parallel(
+                        &left.into_data().into_vec::<i64>().expect("i64 tensor data"),
+                        &right.into_data().into_vec::<i64>().expect("i64 tensor data"),
+                        m, k, n,
+                    );
+                    BTensor::from_data(
+                        burn::tensor::TensorData::new(data, vec![m, n]),
+                        &Default::default(),
+                    )
+                } else {
+                    left.matmul(right)
+                };
                 let unpadded_shape = BShape::new([left_unpadded_shape[0], right_unpadded_shape[1]]);
 
                 Ok(WrappedTensor::Rank2 {
@@ -731,7 +854,26 @@ where
                     unpadded_shape: right_unpadded_shape,
                 },
             ) => {
-                let tensor = left.matmul(right);
+                let tensor = if std::any::TypeId::of::<T>() == std::any::TypeId::of::<i64>() {
+                    let ld = left.shape().dims;
+                    let rd = right.shape().dims;
+                    // broadcast batch handling (e.g. GQA: kv heads broadcast
+                    // over query heads)
+                    let batches = ld[0].max(rd[0]);
+                    let data = matmul_i64_parallel_batched(
+                        &left.into_data().into_vec::<i64>().expect("i64 tensor data"),
+                        &right.into_data().into_vec::<i64>().expect("i64 tensor data"),
+                        batches,
+                        ld[0], rd[0],
+                        ld[1], ld[2], rd[2],
+                    );
+                    BTensor::from_data(
+                        burn::tensor::TensorData::new(data, vec![batches, ld[1], rd[2]]),
+                        &Default::default(),
+                    )
+                } else {
+                    left.matmul(right)
+                };
                 let unpadded_shape = BShape::new([
                     batch_dim(left_unpadded_shape[0], right_unpadded_shape[0]),
                     left_unpadded_shape[1],
