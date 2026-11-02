@@ -14,7 +14,7 @@
 
 ## 1 测试矩阵与结果
 
-模型可用性：`zkml/model_cache` 中真实权重仅 **gpt2**、**gemma-3-270m-it**、**Llama-2-7b**（gemma-3-1b / Llama-3.2-1B / TinyLlama / 两个 gguf 均为未拉取的 git-lfs 指针——已加检测，报错可操作）。
+模型可用性（逐文件 LFS magic 复核后更正）：真实权重 = **gpt2、gemma-3-270m-it、Llama-2-7b、Llama-3.2-1B（2.3GB BF16，此前误判为指针）**；LFS 指针（未拉取）= **gemma-3-1b-it**（1.86GB，gated）、TinyLlama、4 个 gguf 变体。原因：本机无 git-lfs，HF 下载走 git clone 流程时大文件只留指针。一键补拉脚本：`model_cache/download_missing_weights.sh`（内置各文件 sha256 校验，取自指针 oid；gemma-1b 为 gated 需 HF_TOKEN）。
 
 | # | 模型 | 序列 | 模式 | 结果 | 备注 |
 | --- | --- | --- | --- | --- | --- |
