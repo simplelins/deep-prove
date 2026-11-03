@@ -27,8 +27,8 @@ GIT_HEAD=$(git -C "$SCRIPT_DIR/../.." rev-parse --short HEAD 2>/dev/null)
   echo "=== retest campaign: pattern='$PATTERN' git=$GIT_HEAD start=$(date) ==="
   echo "results: $RUN_DIR"
   echo ""
-  echo "时间预算参考: gpt2 3项~35min | gemma270m 5项~6-8h | gemma1b 2项~3h"
-  echo "              llama7b 2项~6-9h | 总计 ~14-18h（过夜）"
+  echo "时间预算参考: gpt2 3项~35min | gemma270m 5项~6-8h | gemma1b 5项~14h | llama7b 2项~6-9h"
+  echo "              总计 ~20-26h（跨天）"
   echo ""
   echo "已知预期: gpt2_s4096 = 架构拒绝(PASS-expected-failure)"
   echo "          llama7b_s4096 = 不含在默认全量里（预估数天）"
@@ -37,7 +37,7 @@ GIT_HEAD=$(git -C "$SCRIPT_DIR/../.." rev-parse --short HEAD 2>/dev/null)
 PASS=0; FAIL=0; EXPECT=0; SKIP=0
 for t in gpt2_s128 gpt2_s1024 gpt2_s4096 \
          gemma270m_s512 gemma270m_s1024 gemma270m_s4096 gemma270m_s8192 gemma270m_s16384 \
-         gemma1b_s512 gemma1b_s4096 \
+         gemma1b_s512 gemma1b_s1024 gemma1b_s4096 gemma1b_s8192 gemma1b_s16384 \
          llama7b_s512 llama7b_s1024; do
   [[ "$t" == $PATTERN ]] || continue
   echo "" | tee -a "$INDEX"

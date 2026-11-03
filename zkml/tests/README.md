@@ -33,7 +33,7 @@ cd zkml/tests
 ./run_test.sh gemma270m_s4096         # 4k 档
 nohup ./run_test.sh llama7b_s1024 > llama1024.log 2>&1 &   # 长测试后台跑
 
-# 全量战役（顺序执行 ~14-18h，过夜）
+# 全量战役（顺序执行 ~20-26h，跨天；单失败不中断）
 nohup ./run_all.sh > campaign.log 2>&1 &
 tail -f campaign.log
 
@@ -55,7 +55,10 @@ nohup ./run_all.sh 'llama*'      > c_llama.log 2>&1 &
 | gemma270m_s8192 | | 8192 | ✅ | ~2 h | ~250 GB |
 | gemma270m_s16384 | | **16384（最长档）** | ✅ | ~3-4 h | ~400 GB |
 | gemma1b_s512 | gemma-3-1b (SWA512) | 512 | ✅ | 40-70 min | ~60 GB |
+| gemma1b_s1024 | | 1024 | ✅ | ~1 h | ~90 GB |
 | gemma1b_s4096 | | 4096 | ✅ | ~2-3 h | ~250 GB |
+| gemma1b_s8192 | | 8192 | ✅ | ~4 h | ~330 GB |
+| gemma1b_s16384 | | 16384 | ✅ | ~7 h | ~420 GB |
 | llama7b_s512 | llama-2-7b | 512 | ✅ 基线 1.88h | 1.9 h | 420 GB |
 | llama7b_s1024 | | **1024（实际最大可行）** | ✅ | 4-7 h | ~500 GB |
 | llama7b_s4096 | | 4096 | ⛔ 预估数天（T_pad 1.9TB Fr）——默认不跑 | 数天 | — |
