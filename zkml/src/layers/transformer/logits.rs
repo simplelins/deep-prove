@@ -426,15 +426,20 @@ impl ProveInfo for Logits {
         );
 
         if self.range_check_chunks() == 1 {
-            // the MLE to commit is the tensor of max values, so we set the size the size of this tensor as
-            // the biggest MLE being committed
-            aux.max_poly_len = aux.last_output_shape[0]
-                .iter()
-                .take(aux.last_output_shape[0].rank() - 1)
-                .product();
+            // the MLE to commit is the tensor of max values; take its size as a
+            // lower bound on the biggest MLE committed so far. NOTE: this must be
+            // a max() over the running value — overwriting it would shrink the
+            // PCS setup below what earlier layers' polynomials require (their
+            // chunked commitments still walk g1_powers up to their own length).
+            aux.max_poly_len = aux.max_poly_len.max(
+                aux.last_output_shape[0]
+                    .iter()
+                    .take(aux.last_output_shape[0].rank() - 1)
+                    .product(),
+            );
         } else {
             // otherwise, we commit to the range-checked inputs, which are the biggest MLEs committed in this layer
-            aux.max_poly_len = aux.last_output_shape[0].numel();
+            aux.max_poly_len = aux.max_poly_len.max(aux.last_output_shape[0].numel());
         }
 
         aux.last_output_shape = self.output_shapes(&aux.last_output_shape, PaddingMode::Padding)?;

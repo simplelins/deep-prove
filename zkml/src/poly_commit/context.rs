@@ -99,16 +99,36 @@ impl<'a, F: PrimeField, PCS: CommitmentScheme> AppendToTranscript
 }
 
 // This is the threshold we employ to split committed polynomials into multiple chunks;
-// any polynomial with more variables than this is split into chunks
-const DEFAULT_CHUNK_SIZE_THRESHOLD: usize = 20;
+// any polynomial with more variables than this is split into chunks.
+//
+// The chunk size (2^threshold field elements) must always be covered by the PCS
+// setup: g1_powers are built with at least this many powers (see
+// build_global_context_data). Larger thresholds mean fewer chunks per polynomial
+// (less per-chunk overhead: transcript appends, opening batching) at the price of
+// a larger prover setup. Configurable via ZKML_CHUNK_THRESHOLD_LOG (log2 of the
+// chunk size), default 22 (16 MiB of field elements per chunk).
+const DEFAULT_CHUNK_SIZE_THRESHOLD: usize = 22;
 
 lazy_static! {
-    pub(crate) static ref CHUNK_SIZE_THRESHOLD: RwLock<Option<usize>> = RwLock::new(None);
+    pub(crate) static ref CHUNK_SIZE_THRESHOLD: RwLock<Option<usize>> = RwLock::new(
+        std::env::var("ZKML_CHUNK_THRESHOLD_LOG")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+    );
 }
-// This is the maximum number of chunks we allow for each polynomial, to ensure that
-// the verifier work doesn't get too intensive. Indeed, the verifier work for each committed
-// polynomial is proportional to the number of chunks. Must be a power of 2
-const MAX_CHUNKS: usize = 128;
+
+/// The effective log2 of the commitment chunk size (env-overridable, default 23).
+pub(crate) fn chunk_size_threshold_log() -> usize {
+    CHUNK_SIZE_THRESHOLD
+        .read_recursive()
+        .unwrap_or(DEFAULT_CHUNK_SIZE_THRESHOLD)
+}
+// Sanity bound against runaway chunk counts only. It must NEVER limit the chunk
+// count below what keeps every chunk at the chunk-size threshold: capping the
+// count makes each chunk grow past the threshold and the msm then indexes
+// g1_powers out of range (seen as `range end index 2^23 out of range for slice
+// of length 2^21+1` on gemma-270m s=4096 with the old value 128).
+const MAX_CHUNKS: usize = 1 << 16;
 
 /// Compute the number of chunks a polynomial with `poly_num_vars` variables is split into
 /// in order to be committed
@@ -117,7 +137,7 @@ fn num_chunks_for_polynomial(poly_num_vars: usize) -> usize {
         .read_recursive()
         .unwrap_or(DEFAULT_CHUNK_SIZE_THRESHOLD);
     let num_chunks = (1usize << poly_num_vars).div_ceil(1usize << chunk_size_threshold);
-    // we need to cap the number of chunks to `MAX_CHUNKS`
+    // sanity cap only (see note above); never caps below the threshold-sized chunks
     num_chunks.min(MAX_CHUNKS)
 }
 

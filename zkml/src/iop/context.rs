@@ -170,6 +170,13 @@ impl Model<Element> {
             let inner_metrics = Metrics::new();
             let multiplicity_vars = table.table_bit_size();
             max_poly_len = max_poly_len.max(1 << multiplicity_vars);
+            // The commitment chunk size must always be covered by the PCS setup:
+            // every committed polynomial is split into chunks of at most
+            // 2^CHUNK_SIZE_THRESHOLD elements, and each chunk's msm walks
+            // g1_powers[0..chunk_len]. Without this floor, a small max_poly_len
+            // (e.g. one computed from 1-token input shapes) starves the powers
+            // array and long-sequence witness polys overrun it.
+            max_poly_len = max_poly_len.max(1 << crate::poly_commit::context::chunk_size_threshold_log());
             debug!(
                 "{} table type: {table:?}, max_poly_len: {max_poly_len}",
                 inner_metrics.to_span()
