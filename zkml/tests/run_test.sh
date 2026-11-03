@@ -83,10 +83,19 @@ ROW=$(lookup "$TEST_ID") || { echo "未知 test_id: $TEST_ID"; exit 1; }
 IFS='|' read -r NAME MODEL REPO SEQ EXPECT MODEL_TAG DESC <<< "$ROW"
 
 # 权重与 tokenizer 预检（LFS 指针/缺失即 FATAL，并给出修复指引）
+# 权重预检：支持单文件与分片（index.json + shards）两种布局
 WEIGHT="$CACHE/$REPO/model.safetensors"
-sz=$(stat -c%s "$WEIGHT" 2>/dev/null || echo 0)
-if [ "$sz" -lt 1000000 ]; then
-  echo "FATAL: $WEIGHT 缺失或为 LFS 指针（${sz}B）。"
+INDEX="$CACHE/$REPO/model.safetensors.index.json"
+if [ -f "$INDEX" ]; then
+  # 分片模型：至少一个分片 >1MB 即认为权重在位
+  SHARD_OK=$(find "$CACHE/$REPO" -name "model-*-of-*.safetensors" -size +1M 2>/dev/null | head -1)
+  if [ -z "$SHARD_OK" ]; then
+    echo "FATAL: $REPO 分片权重缺失（仅 index.json）。"
+    echo "修复: cd $CACHE && HF_ENDPOINT=https://hf-mirror.com ./download_missing_weights.sh"
+    exit 1
+  fi
+elif [ "$(stat -c%s "$WEIGHT" 2>/dev/null || echo 0)" -lt 1000000 ]; then
+  echo "FATAL: $WEIGHT 缺失或为 LFS 指针。"
   echo "修复: cd $CACHE && HF_ENDPOINT=https://hf-mirror.com ./download_missing_weights.sh"
   exit 1
 fi
