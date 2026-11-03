@@ -54,7 +54,40 @@
 
 **burn-ndarray 的 i64 matmul 是朴素单线程实现**（multi-threads feature 仅对浮点 gemm 生效）：gemma-270m s=1024 的**单次前向 57 分钟**（run 循环打点 forward=3421s，流式证明只增加 ~5 分钟）。外推：s=4096 前向 ~15h、s=8192 ~60h、s=16384 ~240h——**4k+ 的 CPU 端到端测试在当前实现下不可行**，与流式证明无关。可行路径：① CUDA 后端（`--features cuda`，前向 GPU 化）；② burn/candle 的多线程 i64 gemm；③ G 文档的 GPU 实测路线。
 
-## 5 性能数据汇总（流式 pipeline, window=2, budget=512MB）
+## 5 复盘战役结果（同二进制全量重测，RUN_ID 20261103_090437）
+
+| # | 测试 | 结果 | 关键数据 |
+| --- | --- | --- | --- |
+| gpt2_s128 | 冒烟 | ✅ PASS | verify 通过 |
+| gpt2_s1024 | 最大可测 | ✅ PASS | |
+| gpt2_s4096 | 架构拒绝 | ✅ 预期失败 | |
+| gemma270m_s512 | | ✅ PASS | |
+| gemma270m_s1024 | | ✅ PASS | |
+| gemma270m_s4096 | 4k | ❌ FAIL（2h 后） | **MSM 越界 panic**（§5.1 P3） |
+| gemma270m_s8192 | 8k | ❌ FAIL（5.8h 后） | 同 P3（分块分支越界） |
+| gemma270m_s16384 | 16k | ❌ exit=137 | **OOM killed**（§5.2） |
+| gemma1b_s512 | | ❌ exit=101 | **P1 复现**（chunk idx 6, Chunk(9)） |
+| gemma1b_s1024 | | ❌ exit=101 | **P1 复现**（chunk idx 16, Chunk(17)） |
+| llama7b_s512/s1024 | | 🔄 | 战役继续串行执行 |
+
+### 5.1 P3（新）：PCS setup 容量不足——长序列 witness poly 越界
+
+panic：`range end index 8388608 (2²³) out of range for slice of length 2097153 (2²¹+1)`，位置 `batch_poly_msm`（F1 补丁分块分支前后均有）。
+
+- **g1_powers 长度 = 2²¹+1**（context 生成的 max_poly_len 仅 2²¹），而 s=4096 时 gemma-270m 的 witness poly 达 **2²³**（requant [4096, 2048]）——**原版代码同样越界**（`&g1_powers[..msm_size]`），非 F1 补丁引入；
+- **疑点**：`num_chunks_for_polynomial` 的 chunking（threshold 2²⁰、MAX_CHUNKS=128）本应把大 poly 切成 ≤2²⁰ 块——但实测有 2²³ 的 poly 以单块进入 msm；**chunking 覆盖缺口待查**（哪个 poly 组装路径绕过了 `num_chunks_for_polynomial`）；
+- **连带**：`MAX_CHUNKS=128` 上限使 >2²⁷ 的 poly（gemma-1b s=512 的 [512,262144]=2²⁷ 恰好 128 块；s=1024 的 2²⁸ 需要 256 块被 cap）每块超过 g1_powers 容量——**P1 偶发失败可能与 cap 后的切块尺寸/越界边缘直接相关**（此前仅表现为 sumcheck 失配的 P1 与越界 panic 可能同根）；
+- **修复方向**：① 审计全部进入 `batch_commit` 的 poly 组装路径，统一走 `num_chunks_for_polynomial`；② `MAX_CHUNKS` 与 `g1_powers` 容量的一致性校验（context 生成时断言）；③ 短期绕过：campaign 对 s≥4096 显式调大 `CHUNK_SIZE_THRESHOLD`（RwLock 可调）并验证。
+
+### 5.2 内存上限：s=16384 OOM（exit=137）
+
+T_pad≈48GB Fr + 48 段窗口 + 段内 poly 工作集 → 峰值超 1TB RAM 被 SIGKILL。解法：① 降 window 至 1；② 降段预算不可行（段已受 P3 限制）；③ 根本解法 = P3 修复 + 评估分批验证。
+
+### 5.3 P1 升级：跨模型复现（gemma-1b 2/2）
+
+gemma-1b s=512（chunk idx 6, Chunk(9), 68 节点）与 s=1024（chunk idx 16, Chunk(17), 34 节点）均以 sumcheck 0th round 失配失败——**P1 从"偶发"升级为"1b 模型上必现"**。与 gemma-270m 的区别：1b 的 witness poly 更大（2²⁷，触及 MAX_CHUNKS 边界）——**P1 与 P3 可能同根**（chunking/容量边缘），合并排查。
+
+## 6 性能数据汇总（流式 pipeline, window=2, budget=512MB）
 
 ### 5.1 llama-7b 证明性能异常（P2，待专项 profiling）
 
