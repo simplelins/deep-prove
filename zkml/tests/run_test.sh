@@ -104,6 +104,9 @@ echo "=== [$TEST_ID] start $(date) seq=$SEQ model=$MODEL expect=$EXPECT ==="
 echo "    $DESC"
 
 LOG="$RUN_DIR/${MODEL_TAG}_s${SEQ}.log"
+# file_cache resolves weights via the relative path model_cache/... so the
+# bench process must run with cwd=zkml
+cd "$REPO_ROOT/zkml" || exit 1
 RUST_LOG=info stdbuf -oL -eL "$BIN" \
   --model "$MODEL" --hf "$REPO" --sequence "$SEQ" \
   --streaming --stream-budget-mb "$BUDGET_MB" --stream-window "$WINDOW" \
