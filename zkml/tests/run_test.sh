@@ -19,7 +19,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BIN="$REPO_ROOT/target/release/bench-llm"
 CACHE="$REPO_ROOT/zkml/model_cache"
 RESULTS_ROOT=${RESULTS_ROOT:-$CACHE/results}
-RUN_ID=${RUN_ID:-$(date +%m%d_%H%M%S)}
+GIT_SHORT=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo nogit)
+RUN_ID=${RUN_ID:-$(date +%Y%m%d_%H%M%S)_$GIT_SHORT}
 RUN_DIR="$RESULTS_ROOT/$RUN_ID"
 mkdir -p "$RUN_DIR"
 
@@ -30,23 +31,23 @@ GIT_HEAD=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null)
 PROMPT_FILE="$CACHE/long_prompt.txt"
 
 TESTS=(
-  "gpt2_s128|gpt2|openai-community/gpt2|128|pass|冒烟;内存~30GB;~10min"
-  "gpt2_s1024|gpt2|openai-community/gpt2|1024|pass|gpt2 最大可测长度;~84GB;~25min"
-  "gpt2_s4096|gpt2|openai-community/gpt2|4096|fail|预期架构拒绝(位置嵌入上限1024);~1min"
-  "gemma270m_s512|gemma3|google/gemma-3-270m-it|512|pass|~56GB;~5min"
-  "gemma270m_s1024|gemma3|google/gemma-3-270m-it|1024|pass|SWA 生效档;~8GB证;~12min"
-  "gemma270m_s4096|gemma3|google/gemma-3-270m-it|4096|pass|rayon matmul 后可行;~1h"
-  "gemma270m_s8192|gemma3|google/gemma-3-270m-it|8192|pass|~2h"
-  "gemma270m_s16384|gemma3|google/gemma-3-270m-it|16384|pass|最长档;内存峰值或400GB;~3-4h"
-  "gemma1b_s512|gemma3|google/gemma-3-1b-it|512|pass|权重已就位(sha256 3d4ef8d7);~40-70min"
-  "gemma1b_s1024|gemma3|google/gemma-3-1b-it|1024|pass|~1h"
-  "gemma1b_s4096|gemma3|google/gemma-3-1b-it|4096|pass|4k 档;~2-3h"
-  "gemma1b_s8192|gemma3|google/gemma-3-1b-it|8192|pass|~4h"
-  "gemma1b_s16384|gemma3|google/gemma-3-1b-it|16384|pass|最长档;~7h"
-  "llama7b_s512|llama2|meta-llama/Llama-2-7b-hf|512|pass|已测基线 1.88h(修复后)"
-  "llama7b_s1024|llama2|meta-llama/Llama-2-7b-hf|1024|pass|llama 实际最大可行;内存或500GB+;~4-7h"
-  "llama7b_s4096|llama2|meta-llama/Llama-2-7b-hf|4096|fail|预估数天(T_pad 1.9TB Fr);慎跑"
-  "llama32_s512|llama2|LLM-Research/Llama-3.2-1B|512|pass|实验性:llama3 rope-scaling 支持性待验证"
+  "gpt2_s128|gpt2|openai-community/gpt2|128|pass|gpt2|冒烟;内存~30GB;~10min"
+  "gpt2_s1024|gpt2|openai-community/gpt2|1024|pass|gpt2|gpt2 最大可测长度;~84GB;~25min"
+  "gpt2_s4096|gpt2|openai-community/gpt2|4096|fail|gpt2|预期架构拒绝(位置嵌入上限1024);~1min"
+  "gemma270m_s512|gemma3|google/gemma-3-270m-it|512|pass|gemma-270m|~56GB;~5min"
+  "gemma270m_s1024|gemma3|google/gemma-3-270m-it|1024|pass|gemma-270m|SWA 生效档;~8GB证;~12min"
+  "gemma270m_s4096|gemma3|google/gemma-3-270m-it|4096|pass|gemma-270m|rayon matmul 后可行;~1h"
+  "gemma270m_s8192|gemma3|google/gemma-3-270m-it|8192|pass|gemma-270m|~2h"
+  "gemma270m_s16384|gemma3|google/gemma-3-270m-it|16384|pass|gemma-270m|最长档;内存峰值或400GB;~3-4h"
+  "gemma1b_s512|gemma3|google/gemma-3-1b-it|512|pass|gemma-1b|权重已就位(sha256 3d4ef8d7);~40-70min"
+  "gemma1b_s1024|gemma3|google/gemma-3-1b-it|1024|pass|gemma-1b|~1h"
+  "gemma1b_s4096|gemma3|google/gemma-3-1b-it|4096|pass|gemma-1b|4k 档;~2-3h"
+  "gemma1b_s8192|gemma3|google/gemma-3-1b-it|8192|pass|gemma-1b|~4h"
+  "gemma1b_s16384|gemma3|google/gemma-3-1b-it|16384|pass|gemma-1b|最长档;~7h"
+  "llama7b_s512|llama2|meta-llama/Llama-2-7b-hf|512|pass|llama-2-7b|已测基线 1.88h(修复后)"
+  "llama7b_s1024|llama2|meta-llama/Llama-2-7b-hf|1024|pass|llama-2-7b|llama 实际最大可行;内存或500GB+;~4-7h"
+  "llama7b_s4096|llama2|meta-llama/Llama-2-7b-hf|4096|fail|llama-2-7b|预估数天(T_pad 1.9TB Fr);慎跑"
+  "llama32_s512|llama2|LLM-Research/Llama-3.2-1B|512|pass|llama-3.2-1B|实验性:llama3 rope-scaling 支持性待验证"
 )
 
 lookup() {
@@ -79,7 +80,7 @@ TEST_ID=${1:-}
 [ -z "$TEST_ID" ] && { echo "用法: $0 <test_id>"; echo "可用 test_id:"; for t in "${TESTS[@]}"; do echo "  ${t%%|*}"; done; exit 1; }
 
 ROW=$(lookup "$TEST_ID") || { echo "未知 test_id: $TEST_ID"; exit 1; }
-IFS='|' read -r NAME MODEL REPO SEQ EXPECT DESC <<< "$ROW"
+IFS='|' read -r NAME MODEL REPO SEQ EXPECT MODEL_TAG DESC <<< "$ROW"
 
 # 权重与 tokenizer 预检（LFS 指针/缺失即 FATAL，并给出修复指引）
 WEIGHT="$CACHE/$REPO/model.safetensors"
@@ -102,13 +103,13 @@ NEED_G=350
 echo "=== [$TEST_ID] start $(date) seq=$SEQ model=$MODEL expect=$EXPECT ==="
 echo "    $DESC"
 
-LOG="$RUN_DIR/${TEST_ID}.log"
+LOG="$RUN_DIR/${MODEL_TAG}_s${SEQ}.log"
 RUST_LOG=info stdbuf -oL -eL "$BIN" \
   --model "$MODEL" --hf "$REPO" --sequence "$SEQ" \
   --streaming --stream-budget-mb "$BUDGET_MB" --stream-window "$WINDOW" \
   --stream-max-segments "$MAX_SEG" \
   --prompt-file "$PROMPT_FILE" \
-  --bench "$RUN_DIR/bench.${TEST_ID}.csv" \
+  --bench "$RUN_DIR/${MODEL_TAG}_s${SEQ}.csv" \
   > "$LOG" 2>&1
 EXIT=$?
 
@@ -126,7 +127,7 @@ fi
 # ---------------------------------------------------------------------------
 # 汇总提取
 # ---------------------------------------------------------------------------
-CSV_FILE=$(ls -t "$RUN_DIR"/bench.${TEST_ID}*.csv 2>/dev/null | head -1)
+CSV_FILE=$(ls -t "$RUN_DIR"/${MODEL_TAG}_s${SEQ}*.csv 2>/dev/null | head -1)
 {
   echo "=== retest: $TEST_ID seq=$SEQ model=$MODEL exit=$EXIT verdict=$VERDICT git=$GIT_HEAD $(date) ==="
   echo "desc: $DESC"
@@ -164,9 +165,9 @@ for k in ['context_generation_time','streaming_prove_full','prove_full_memory_pe
 PYEOF
   fi
   echo "binary: $(ls -la $BIN | awk '{print $5, $6, $7, $8}')"
-} > "$RUN_DIR/summary.${TEST_ID}.txt" 2>&1
+} > "$RUN_DIR/${MODEL_TAG}_s${SEQ}.summary.txt" 2>&1
 
 echo "=== [$TEST_ID] exit=$EXIT verdict=$VERDICT ==="
-echo "    summary: $RUN_DIR/summary.${TEST_ID}.txt"
+echo "    summary: $RUN_DIR/${MODEL_TAG}_s${SEQ}.summary.txt"
 [ "$VERDICT" == "FAIL" ] && grep -aE "Error:|panicked" "$LOG" | head -2
 exit $([ "$VERDICT" == "PASS" ] || [ "$VERDICT" == "PASS-expected-failure" ] && echo 0 || echo 1)

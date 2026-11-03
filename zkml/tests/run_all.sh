@@ -15,7 +15,8 @@
 set -u
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PATTERN=${1:-*}
-RUN_ID=$(date +%m%d_%H%M%S)
+GIT_SHORT=$(git -C "$(cd "$SCRIPT_DIR/../.." && pwd)" rev-parse --short HEAD 2>/dev/null || echo nogit)
+RUN_ID=$(date +%Y%m%d_%H%M%S)_$GIT_SHORT
 export RUN_ID
 RESULTS_ROOT=${RESULTS_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)/zkml/model_cache/results}
 RUN_DIR="$RESULTS_ROOT/$RUN_ID"
