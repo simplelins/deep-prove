@@ -79,9 +79,17 @@ panic：`range end index 8388608 (2²³) out of range for slice of length 209715
 - **连带**：`MAX_CHUNKS=128` 上限使 >2²⁷ 的 poly（gemma-1b s=512 的 [512,262144]=2²⁷ 恰好 128 块；s=1024 的 2²⁸ 需要 256 块被 cap）每块超过 g1_powers 容量——**P1 偶发失败可能与 cap 后的切块尺寸/越界边缘直接相关**（此前仅表现为 sumcheck 失配的 P1 与越界 panic 可能同根）；
 - **修复方向**：① 审计全部进入 `batch_commit` 的 poly 组装路径，统一走 `num_chunks_for_polynomial`；② `MAX_CHUNKS` 与 `g1_powers` 容量的一致性校验（context 生成时断言）；③ 短期绕过：campaign 对 s≥4096 显式调大 `CHUNK_SIZE_THRESHOLD`（RwLock 可调）并验证。
 
-### 5.2 内存上限：s=16384 OOM（exit=137）
+### 5.2 内存上限：s=8192 OOM（exit=137）；s=16384 同理未跑
 
-T_pad≈48GB Fr + 48 段窗口 + 段内 poly 工作集 → 峰值超 1TB RAM 被 SIGKILL。解法：① 降 window 至 1；② 降段预算不可行（段已受 P3 限制）；③ 根本解法 = P3 修复 + 评估分批验证。
+T_pad（gemma-270m s=8192 ≈96GB Fr）+ 48 段窗口 + 段证明工作集 → 峰值超 1TB RAM 被 SIGKILL（日志无 panic，SIGKILL 特征）。s=16384 翻倍更不可行。**解法**：① window 降 1（省一段，不足）；② CUDA 后端跑前向与证明；③ 减少 prove 工作集（分批 sumcheck）。属内存容量边界，非软件缺陷。
+
+### 5.2.1 P3 修复验证（阈值 22 + 容量兜底，二进制 11-04）
+
+s=4096 端到端 **通过**（修复前 2h 后必现 msm 越界）：48 段、forward=885s、dispatch=5313s、finish=1462s、**磁盘读 0**、内存峰值 734GB、proof 27.7MB、verify 8.2s。**P3 实锤修复**。
+
+### 5.2.2 P1 修复后观察（6/6 通过）
+
+chunking overhaul 后的 gemma-270m s=1024 运行 6 轮全部通过（repro r1/r2 中 r1 过 r2 失败发生于**旧二进制**（无兜底）；repro r3 被终止；hunt r3-r6 + debug2 r1/r2 = 修复后 6/6 PASS）。gemma-1b 的 2/2 失败发生在旧二进制——**1b 需用新二进制重验以确认 P1 消失**。
 
 ### 5.3 P1 升级：跨模型复现（gemma-1b 2/2）
 
