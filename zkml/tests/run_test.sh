@@ -47,6 +47,8 @@ TESTS=(
   "llama7b_s512|llama2|meta-llama/Llama-2-7b-hf|512|pass|llama-2-7b|已测基线 1.88h(修复后)"
   "llama7b_s1024|llama2|meta-llama/Llama-2-7b-hf|1024|pass|llama-2-7b|llama 实际最大可行;内存或500GB+;~4-7h"
   "llama7b_s4096|llama2|meta-llama/Llama-2-7b-hf|4096|fail|llama-2-7b|预估数天(T_pad 1.9TB Fr);慎跑"
+  "llama13b_s128|llama2|meta-llama/Llama-2-13b-hf|128|pass|llama-2-13b|13b 冒烟;峰值或650GB;~2-3h"
+  "llama13b_s512|llama2|meta-llama/Llama-2-13b-hf|512|pass|llama-2-13b|13b 理论最大可行(T_pad≈98GB Fr);~8-12h"
   "llama32_s512|llama2|LLM-Research/Llama-3.2-1B|512|pass|llama-3.2-1B|实验性:llama3 rope-scaling 支持性待验证"
 )
 
