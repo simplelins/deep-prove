@@ -353,8 +353,15 @@ impl<'a, F: PrimeField, T: Transcript, PCS: CommitmentScheme<Field = F>> Verifie
             chunk.subgraph.backward_iter().try_fold(
             HashMap::<NodeInput, Claim<F>>::new(),
             |mut claims, (node_id, node)| -> anyhow::Result<HashMap<NodeInput, Claim<F>>> {
+                tracing::debug!("[verify-node] chunk {chunk_id} node {node_id}");
                 match node {
                     Node::Inner(inner_node) => {
+                        if let Some(first_claim) = claims.values().next() {
+                            eprintln!(
+                                "[p1-debug] VERIFY chunk {chunk_id} node {node_id} first_claim={}",
+                                first_claim.eval.into_bigint()
+                            );
+                        }
                         let split_layer = if let ChunkedNode::SplitLayer(split_layer) = inner_node {
                             Some(LayerCtx::Split(split_layer.clone()))
                         } else {

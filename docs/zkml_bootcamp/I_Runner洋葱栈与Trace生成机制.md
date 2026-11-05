@@ -2,21 +2,22 @@
 
 ## 文档控制
 
-| 项目 | 内容 |
-| --- | --- |
-| 文档编号 | I |
-| 所属系列 | zkml_bootcamp |
-| 版本 | 1.1 |
-| 发布日期 | 2026-10-29 |
-| 文档状态 | 已发布 |
+| 项目         | 内容                                                                                                                                                                                                                                                                                                                                                |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 文档编号     | I                                                                                                                                                                                                                                                                                                                                                   |
+| 所属系列     | zkml_bootcamp                                                                                                                                                                                                                                                                                                                                       |
+| 版本         | 1.1.1                                                                                                                                                                                                                                                                                                                                               |
+| 发布日期     | 2026-10-29                                                                                                                                                                                                                                                                                                                                          |
+| 文档状态     | 已发布                                                                                                                                                                                                                                                                                                                                              |
 | 适用代码基线 | `zkml/src/model/mod.rs`、`zkml/src/model/llm.rs`、`zkml/src/model/trace.rs`、`zkml/src/tensor/handle.rs`、`zkml/src/layers/transformer/mod.rs`、`zkml/src/layers/provable/mod.rs`、`zkml/src/graph/graph.rs`、`zkml/src/iop/prover.rs`、`zkml/src/iop/chunking.rs`、`zkml/src/iop/prover_graph.rs`（当前 master，行号以此为据） |
 
 ### 修订记录
 
-| 版本 | 日期 | 修订说明 |
-| --- | --- | --- |
-| 1.0 | 2026-10-28 | 首次发布：Runner 洋葱栈组件设计、图执行模型、Trace 生成与 Token 生成流程 |
-| 1.1 | 2026-10-29 | 补齐四块深入分析：`layer.evaluate` 内部与 `LayerOut` 三件套（§3.6）、Port/Feed 图连接与寻址机制（§3.7）、StoreRunner 发送数据逐项拆解（§3.3）；新增 §5 `prove_chunk`：Trace 消费与证明全流程（切分策略、执行图、逐阶段拆解、逐算子证明协议）；原 §5/§6 顺延为 §6/§7 |
+| 版本  | 日期       | 修订说明                                                                                                                                                                                                                                                                          |
+| ----- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1.0   | 2026-10-28 | 首次发布：Runner 洋葱栈组件设计、图执行模型、Trace 生成与 Token 生成流程                                                                                                                                                                                                          |
+| 1.1   | 2026-10-29 | 补齐四块深入分析：`layer.evaluate` 内部与 `LayerOut` 三件套（§3.6）、Port/Feed 图连接与寻址机制（§3.7）、StoreRunner 发送数据逐项拆解（§3.3）；新增 §5 `prove_chunk`：Trace 消费与证明全流程（切分策略、执行图、逐阶段拆解、逐算子证明协议）；原 §5/§6 顺延为 §6/§7 |
+| 1.1.1 | 2026-10-30 | 修正 §3.7：storage_key 实际格式为 Display 输出 `Output: N3->:0`（手写 impl，graph.rs:141-150），非 `N5_1`；§3.7.1 补 PortLink/Feed/源汇语义与连线示例；§3.7.2 扩为六步拆解 + 走查示例 + 排序去重完整论证；§3.7.3 补 feeds 与 ports 三点差异及消费走查                     |
 
 ## 目录
 
@@ -84,42 +85,42 @@
 
 ### 1.4 术语、定义与缩略语
 
-| 术语 / 缩略语 | 定义 |
-| --- | --- |
-| Runner | 实现 `LayerRunner` trait 的类型，`run_layer` 为其核心钩子（mod.rs:118）；Runner 之间通过泛型 `inner` 装饰器嵌套 |
-| 洋葱栈 | 本文对装饰器栈的称呼：每次节点调用沿 `HandleLifetimeRunner → TraceRunner → StoreRunner → BaseRunner → layer.evaluate()` 逐层进入、逐层返回 |
-| handle | `TensorHandle<N>`；由 `storage_key`、store 引用、（可空的）内存张量副本三部分构成 |
-| dry / wet | dry：删除 handle 的内存副本（handle.rs:451），数据仍可通过 store 的 `load()` 重载（handle.rs:375）；wet：副本当前驻留内存 |
-| storage_key | 由 `NodeOutput` 格式化得到的字符串键（mod.rs:1109），是张量数据在 store 中寻址与跨层衔接的唯一标识 |
-| proving data | 量化后的 `Element`（i64）张量，由 `ProvingHandle` 承载，供证明电路消费 |
-| heavy run | `run_elements` 收尾处对完整句子的单次全图前向（llm.rs:566-573），是 Trace 的最终生成点 |
-| KV 增量 | 层内 concatenation cache 机制：新输入仅 1 个 token 时先与缓存拼接再计算（transformer/mod.rs:19-117） |
-| LayerOut | 层评估返回值三件套：`outputs`（输出张量）+ `proving_data`（证明辅助数据）+ `tracked_layer_data`（量化校准数据）（provable/mod.rs:207-214） |
-| ProvingData / ProvingHandle | 层评估期 / 运行期两态的证明辅助数据枚举；`ProvingHandle` 将底层数据包装为可落盘的 handle（provable/mod.rs:44-71） |
-| TrackedDataId | 量化校准通道中中间张量的字符串标识（provable/mod.rs:204） |
-| Port / NodeOutput / NodeInput | 端点编址三元组体系：`NodeOutput(NodeId, port)` 编址某节点的第 port 个输出，`NodeInput(NodeId, port)` 编址输入侧（graph.rs:213-235） |
-| Feed | 一条展平后的数据连接 `{source: NodeOutput, target: NodeInput}`，由边上的端口连接展开而来（graph.rs:518-556） |
-| chunk（证明分块） | `ModelChunk`：模型的连续节点子图 + 边界边记录，是 `prove_chunk` 的输入单元 |
-| claim | 对某 MLE 多项式在一个求值点上的值承诺：`Claim { point, eval }`；证明按 claim 反向传播 |
-| LogUp / sumcheck | 查表证明的两组交互式证明协议；einsum 走 sumcheck，查表算子走 LogUp + linking sumcheck |
-| MLE | 多线性扩展多项式；张量 pad 到 2^n 后即视为其 MLE 在超方格点上的取值表 |
+| 术语 / 缩略语                 | 定义                                                                                                                                             |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Runner                        | 实现 `LayerRunner` trait 的类型，`run_layer` 为其核心钩子（mod.rs:118）；Runner 之间通过泛型 `inner` 装饰器嵌套                            |
+| 洋葱栈                        | 本文对装饰器栈的称呼：每次节点调用沿 `HandleLifetimeRunner → TraceRunner → StoreRunner → BaseRunner → layer.evaluate()` 逐层进入、逐层返回 |
+| handle                        | `TensorHandle<N>`；由 `storage_key`、store 引用、（可空的）内存张量副本三部分构成                                                            |
+| dry / wet                     | dry：删除 handle 的内存副本（handle.rs:451），数据仍可通过 store 的 `load()` 重载（handle.rs:375）；wet：副本当前驻留内存                      |
+| storage_key                   | 由 `NodeOutput` 格式化得到的字符串键（mod.rs:1109），是张量数据在 store 中寻址与跨层衔接的唯一标识                                             |
+| proving data                  | 量化后的 `Element`（i64）张量，由 `ProvingHandle` 承载，供证明电路消费                                                                       |
+| heavy run                     | `run_elements` 收尾处对完整句子的单次全图前向（llm.rs:566-573），是 Trace 的最终生成点                                                         |
+| KV 增量                       | 层内 concatenation cache 机制：新输入仅 1 个 token 时先与缓存拼接再计算（transformer/mod.rs:19-117）                                             |
+| LayerOut                      | 层评估返回值三件套：`outputs`（输出张量）+ `proving_data`（证明辅助数据）+ `tracked_layer_data`（量化校准数据）（provable/mod.rs:207-214） |
+| ProvingData / ProvingHandle   | 层评估期 / 运行期两态的证明辅助数据枚举；`ProvingHandle` 将底层数据包装为可落盘的 handle（provable/mod.rs:44-71）                              |
+| TrackedDataId                 | 量化校准通道中中间张量的字符串标识（provable/mod.rs:204）                                                                                        |
+| Port / NodeOutput / NodeInput | 端点编址三元组体系：`NodeOutput(NodeId, port)` 编址某节点的第 port 个输出，`NodeInput(NodeId, port)` 编址输入侧（graph.rs:213-235）          |
+| Feed                          | 一条展平后的数据连接 `{source: NodeOutput, target: NodeInput}`，由边上的端口连接展开而来（graph.rs:518-556）                                   |
+| chunk（证明分块）             | `ModelChunk`：模型的连续节点子图 + 边界边记录，是 `prove_chunk` 的输入单元                                                                   |
+| claim                         | 对某 MLE 多项式在一个求值点上的值承诺：`Claim { point, eval }`；证明按 claim 反向传播                                                          |
+| LogUp / sumcheck              | 查表证明的两组交互式证明协议；einsum 走 sumcheck，查表算子走 LogUp + linking sumcheck                                                            |
+| MLE                           | 多线性扩展多项式；张量 pad 到 2^n 后即视为其 MLE 在超方格点上的取值表                                                                            |
 
 ### 1.5 参考资料
 
-| 编号 | 文件 |
-| --- | --- |
-| R1 | `zkml/src/model/mod.rs` |
-| R2 | `zkml/src/model/llm.rs` |
-| R3 | `zkml/src/model/trace.rs` |
-| R4 | `zkml/src/tensor/handle.rs` |
-| R5 | `zkml/src/layers/transformer/mod.rs` |
-| R6 | `tenstore/src/genstore.rs` |
-| R7 | `zkml/src/layers/provable/mod.rs`（v1.1） |
-| R8 | `zkml/src/graph/graph.rs`（v1.1） |
-| R9 | `zkml/src/iop/prover.rs`（v1.1） |
-| R10 | `zkml/src/iop/chunking.rs`（v1.1） |
-| R11 | `zkml/src/iop/prover_graph.rs`（v1.1） |
-| R12 | `zkml/src/lookup/context.rs`、`zkml/src/lookup/operation/generic_prove.rs`（v1.1） |
+| 编号 | 文件                                                                                   |
+| ---- | -------------------------------------------------------------------------------------- |
+| R1   | `zkml/src/model/mod.rs`                                                              |
+| R2   | `zkml/src/model/llm.rs`                                                              |
+| R3   | `zkml/src/model/trace.rs`                                                            |
+| R4   | `zkml/src/tensor/handle.rs`                                                          |
+| R5   | `zkml/src/layers/transformer/mod.rs`                                                 |
+| R6   | `tenstore/src/genstore.rs`                                                           |
+| R7   | `zkml/src/layers/provable/mod.rs`（v1.1）                                            |
+| R8   | `zkml/src/graph/graph.rs`（v1.1）                                                    |
+| R9   | `zkml/src/iop/prover.rs`（v1.1）                                                     |
+| R10  | `zkml/src/iop/chunking.rs`（v1.1）                                                   |
+| R11  | `zkml/src/iop/prover_graph.rs`（v1.1）                                               |
+| R12  | `zkml/src/lookup/context.rs`、`zkml/src/lookup/operation/generic_prove.rs`（v1.1） |
 
 ---
 
@@ -153,12 +154,12 @@ Runner 栈采用装饰器（洋葱）结构：外层 Runner 负责横切关注�
 
 ### 2.2 组件清单与职责划分
 
-| 组件 | 层级 | 核心职责 | 典型副作用 |
-| --- | --- | --- | --- |
-| `HandleLifetimeRunner` | 壳 | 输入供给适配（按图查上游 key）、引用计数、内存即时回收 | dry 过期输入；维护 `storagekey_to_handle` |
-| `TraceRunner` | 中层 | 按节点记录 `TraceStep`、收集模型输出 handle、组装 `Trace` | 修改 `Trace` 结构 |
-| `StoreRunner` | 中层 | 把输出/proving 数据卸载到后台线程写 store | spawn 线程；异步编码 + 落盘 |
-| `BaseRunner` | 芯 | 输入懒加载、执行 `layer.evaluate()`、输出打包为 handle、proving handle 构造 | 真正的后端计算 |
+| 组件                     | 层级 | 核心职责                                                                      | 典型副作用                                  |
+| ------------------------ | ---- | ----------------------------------------------------------------------------- | ------------------------------------------- |
+| `HandleLifetimeRunner` | 壳   | 输入供给适配（按图查上游 key）、引用计数、内存即时回收                        | dry 过期输入；维护 `storagekey_to_handle` |
+| `TraceRunner`          | 中层 | 按节点记录 `TraceStep`、收集模型输出 handle、组装 `Trace`                 | 修改 `Trace` 结构                         |
+| `StoreRunner`          | 中层 | 把输出/proving 数据卸载到后台线程写 store                                     | spawn 线程；异步编码 + 落盘                 |
+| `BaseRunner`           | 芯   | 输入懒加载、执行 `layer.evaluate()`、输出打包为 handle、proving handle 构造 | 真正的后端计算                              |
 
 **分层顺序的约束**：StoreRunner 必须位于 TraceRunner 与 HandleLifetimeRunner 之下（即先于它们接收调用）。源码注释（mod.rs:1605-1606）明确原因：后两者会对张量做 dry，若顺序颠倒，写盘侧可能读到已被清除的数据。
 
@@ -201,23 +202,96 @@ for (node_id, layer) in self.graph.forward_inners() {
 
 `LayerRunner<N, I>`（mod.rs:118-145）约定两个钩子：
 
-| 钩子 | 调用时机 | 说明 |
-| --- | --- | --- |
-| `model_inputs(graph, inputs)` | 每次模型推理开始时调用一次 | LLM 场景下等价于"每个 token 轮一次"，是跨轮状态重置的约定入口 |
-| `run_layer(node_id, graph, layer, inputs)` | 每个图节点调用一次 | `inputs` 的类型由第二个泛型参数 `I` 决定（`RunInput<N>` 或 `()`），用于区分"接收输入"与"自取输入"两种模式 |
+| 钩子                                         | 调用时机                   | 说明                                                                                                              |
+| -------------------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `model_inputs(graph, inputs)`              | 每次模型推理开始时调用一次 | LLM 场景下等价于"每个 token 轮一次"，是跨轮状态重置的约定入口                                                     |
+| `run_layer(node_id, graph, layer, inputs)` | 每个图节点调用一次         | `inputs` 的类型由第二个泛型参数 `I` 决定（`RunInput<N>` 或 `()`），用于区分"接收输入"与"自取输入"两种模式 |
 
 ### 3.2 BaseRunner
 
 **位置**：mod.rs:147-246。**输入模式**：`RunInput<N>`（mod.rs:125-131，显式接收输入 handle 数组）。
 
-`run_layer`（mod.rs:173-246）的动作序列：
+**结构**（mod.rs:151-156）：仅两个字段——`store: GenStore`（后备存储引用，克隆进每个产出的 handle）与 `split_nodes_info: Option<&SplittedNodesInfo>`（分布式切分信息，正常推理为 `None`）。`model_inputs` 为空实现（mod.rs:167-171）——芯层不需要跨轮状态，跨轮逻辑全部在上层 Runner。
 
-1. **输入懒加载**：对每个输入 handle 调 `handle.wrapped_tensor()?`（handle.rs:386-410）。若 handle 已被 dry，触发 `store.fetch(storage_key)`：LRU 未命中则读页文件 → msgpack 解码 → 重建张量。此为"从磁盘重载 trace"路径的机制入口；
-2. **输出形状预计算**：按 `PaddingMode::NoPadding` 预先计算输出形状。注释指明目的：concatenation cache 若被评估过程先行修改，会导致形状推导错误，故必须前置；
-3. **算子执行**：`layer.evaluate(&wrapped_tensors)`，委托给 burn 后端（CPU：ndarray 核；GPU：cubecl kernel）；
-4. **输出打包**：每个输出张量构造 `TensorHandle`，绑定 `port.to_storage_key()` 与 store 的克隆引用（mod.rs:209-217）。此后 handle 具备"key + 后备存储 + 可空副本"三件套语义；
-5. **proving handle 构造**：`ProvingHandle::new(node_id 的 key, layer_out.proving_data, store)`（mod.rs:219-221），量化证明数据独立成 handle；
-6. **可选切分**：若 `split_nodes_info` 存在（分布式 chunk 场景），调用 `trace_split.map_handles(...)` 对输出做分块重映射（mod.rs:223-234）。
+`run_layer`（mod.rs:173-242）逐代码拆解（编号对应源码顺序）：
+
+```rust
+fn run_layer(&mut self, node_id, graph, layer, inputs: &RunInput<N>) -> RunResult<N> {
+    // ── ① 输入水合（mod.rs:183-187）──
+    let mut wrapped_tensors_guards = Vec::with_capacity(inputs.input_handles.len());
+    for handle in inputs.input_handles.iter() {
+        wrapped_tensors_guards.push(handle.wrapped_tensor()?);       // 懒加载 + 上读锁
+    }
+
+    // ── ② 解引用为层入参形态（mod.rs:189-192）──
+    let wrapped_tensors = wrapped_tensors_guards.iter()
+        .map(|guard| guard.deref()).collect::<Vec<_>>();             // &[&WrappedTensor<N>]
+
+    // ── ③ 输出形状预计算（mod.rs:197-203）──
+    let prec_unpadded_shapes = inputs.input_handles.iter()
+        .map(|handle| handle.unpadded_shape().clone()).collect();    // 一律 unpadded
+    let out_shapes = layer.output_shapes(&prec_unpadded_shapes, PaddingMode::NoPadding)?;
+
+    // ── ④ 算子执行（mod.rs:205）──
+    let layer_out = layer.evaluate(&wrapped_tensors)?;               // ▶ LayerOut 三件套（§3.6）
+
+    // ── ⑤ 输出打包（mod.rs:207-220）──
+    let out_ports = graph.outgoing_ports(node_id);                   // §3.7.2
+    for (port, out_shape, tensor) in izip!(&out_ports, &out_shapes, layer_out.outputs) {
+        let storage_key = port.to_storage_key();                     // "Output: N5->:0"
+        outputs.push(TensorHandle::from_wrapped_tensor_with_unpadded_shape(
+            storage_key, self.store.clone(), tensor, out_shape.clone()));
+    }
+
+    // ── ⑥ proving handle 构造（mod.rs:222-223）──
+    let storage_key = node_id.to_storage_key();                      // "N5"（节点粒度！）
+    let proving_data = ProvingHandle::new(storage_key, layer_out.proving_data, self.store.clone());
+
+    // ── ⑦ 可选切分映射（mod.rs:225-235）──
+    let trace_split_info = if let Some(trace_split) = self.split_nodes_info {
+        trace_split.map_handles(node_id, graph, &inputs.input_handles, &outputs, &proving_data)?
+    } else { Default::default() };
+
+    // ── ⑧ 组装返回（mod.rs:237-242）──
+    Ok(RunOutput { outputs, proving_data,
+        tracked_data: layer_out.tracked_layer_data,                  // 校准通道透传（§3.6.3）
+        trace_split_info })
+}
+```
+
+**① 输入水合——懒加载机制入口**（handle.rs:420-443，`wrapped_tensor()`）：
+
+```rust
+match self {
+    TensorHandle::WrappedTensor(..) => loop {
+        {   // 小作用域：读守卫在 load 前必须释放
+            let guard = wrapped_tensor.read()?;
+            if guard.is_some() {                       // 副本在内存 → 直接返回
+                return Ok(RwLockReadGuard::map(guard, |v| v.as_ref().unwrap()));
+            }
+        }                                              // guard 在此 drop
+        self.load()?;                                  // 被 dry → 从 store 取回
+    },
+    TensorHandle::Tensor(..) => bail!("..."),
+}
+```
+
+要点：**自旋式"先查副本、缺则回源"循环**——`load()`（handle.rs:375-410）内部走 `store.fetch(storage_key)`：LRU 命中则直接返回，未命中读页文件 → msgpack 解码 → 重建张量并填回 handle 的 `Option<WrappedTensor>`。这就是"从磁盘重载 trace"路径的机制入口，也是 G 文档磁盘加载性能的实测对象。守卫存活到 `run_layer` 返回——evaluate 期间输入张量被读锁保护，不会被并发 dry 掉。
+
+**③ 形状预计算必须在 evaluate 之前**（mod.rs:196-199 源码注释）：层可能带 concatenation cache（层内 KV 增量，transformer/mod.rs:19-117），evaluate 会修改其内部状态——若评估后再推形状，结果会带上 cache 拼接的污染。同时入参取 `unpadded_shape()`、模式取 `NoPadding`：**推理域全程 unpadded，pad 只发生在证明层**（INV-5）。
+
+**⑤ 输出打包**（handle.rs:598-611，`from_wrapped_tensor_with_unpadded_shape`）：构造的 `InnerWrappedTensor` 四个字段各就各位——`storage_key`（端口串 `"Output: N5->:0"`）、`store`（`self.store.clone()`，handle 自带后备存储引用，此后任何持有 handle 的人都能重载数据）、`wrapped_tensor: Arc<RwLock<Option<...>>>`（张量本体移入，可空——dry 的就是把它置 None）、`shape` + `unpadded_shape` 双记录（pad 前后形状，证明期需要前者）。izip 的端口序对齐语义见 §3.7.2。
+
+**⑥ proving 数据以节点为粒度**：注意此处 key 是 `node_id.to_storage_key()`（格式 `"N5"`）而非端口——`ProvingData` 描述的是"这个节点的证明辅助数据"整体（一个节点一份），与逐端口的输出张量处在**两个 key 命名空间**（`N5` vs `Output: N5->:0`），在 store 中互不冲突。`ProvingHandle::new`（provable/mod.rs:73-104）把枚举内每个张量登记成独立 handle 供证明期取回。
+
+**⑦ 切分映射的入参**：`map_handles` 拿到的是**切分前的完整输入/输出/证明 handle**——它产出的 chunk 分片 handle 由上层 StoreRunner 额外发送（§3.3 #2/#3），原 handle 是否补发取决于 recombination 与模型输出判断。
+
+**⑧ tracked_data 的透传**：`layer_out.tracked_layer_data` 原样移入 `RunOutput.tracked_data`——BaseRunner 是唯一不做任何加工的传递者，消费与否由栈中是否有 TrackerRunner 决定（§3.6.3）。
+
+**贯穿全函数的两个设计事实**：
+
+- **双域泛型**：`N: TensorTypeParam` 让同一份代码服务 `f32`（run_float 浮点推理）与 `Element=i64`（量化推理）两个域，域间差异全部压在 `WrappedTensor`/后端层；
+- **芯层零策略**：本函数没有任何"要不要加载""要不要存储"的判断——水合是 handle 的固有行为（缺了就回源），落盘是 StoreRunner 的事，回收是 HandleLifetimeRunner 的事。芯层只做"算 + 打包"，可替换性由此保证。
 
 ### 3.3 StoreRunner
 
@@ -230,14 +304,14 @@ for (node_id, layer) in self.graph.forward_inners() {
 
 **发送规则**（`run_layer`，mod.rs:600-673）：
 
-| 发送对象 | 条件 | 方法 |
-| --- | --- | --- |
-| 输出 handles | 无条件 | `send` |
-| split 产出的 chunk handles | `trace_split_info.output_handles` 非空 | `send` |
-| 原（未切分）handle | 存在 recombination layer，或该输出同时是模型输出 | `send` |
-| split layer handles | `trace_split_info.split_layer` 存在 | `send` |
-| proving handles | 未 split：原 proving handles；已 split：每 chunk 的 proving handles | `send_element` |
-| 模型输入 handles | `trace_split_info.model_input_handles` | `send` |
+| 发送对象                   | 条件                                                                | 方法             |
+| -------------------------- | ------------------------------------------------------------------- | ---------------- |
+| 输出 handles               | 无条件                                                              | `send`         |
+| split 产出的 chunk handles | `trace_split_info.output_handles` 非空                            | `send`         |
+| 原（未切分）handle         | 存在 recombination layer，或该输出同时是模型输出                    | `send`         |
+| split layer handles        | `trace_split_info.split_layer` 存在                               | `send`         |
+| proving handles            | 未 split：原 proving handles；已 split：每 chunk 的 proving handles | `send_element` |
+| 模型输入 handles           | `trace_split_info.model_input_handles`                            | `send`         |
 
 **发送数据逐项拆解——每类数据是什么、给谁用、为什么必须有**（v1.1 补充）：
 
@@ -249,14 +323,14 @@ for (original_handle, feed) in layer_out.outputs.iter().zip(graph.outgoing_feeds
 
 注意配对键是 `outgoing_feeds`（展平的 Feed 列表，按 port 排序）而非 `outputs` 索引本身——`outputs[i]` 的语义由第 i 个**出边端口**定义（见 §3.7）。逐项拆解如下：
 
-| # | 数据 | 触发条件 | 消费方（谁最终会读它） | 为什么需要（缺了会怎样） |
-| --- | --- | --- | --- | --- |
-| 1 | 输出 handle（`send` 原始 handle） | 无条件——每个有出边的节点 | ① 下游节点的懒加载（HandleLifetimeRunner 计数归零后 dry，下游再触发 store 重载）；② prove 阶段 `trace_step.output_tensor_at(port)` 的数据源 | 这是全图数据流的落盘基线。不发送则任何"内存副本被回收"或"跨进程 prove"场景下，该中间量永久不可达，Trace 退化为无肉的骨架 |
-| 2 | split 产出的 chunk handles | 该节点被 chunk 切分（`trace_split_info.output_handles` 命中该 storage_key） | 各 chunk 的 `ChunkProver`：每个 chunk 只拿自己覆盖的输入切片 | 切分后每 chunk 需要独立的张量分片落盘；不发则分布式/分块证明读不到分片 |
-| 3 | 原（未切分）handle | ① 有 recombination layer；② 该输出同时是模型输出 | ① recombination step 的证明需要"分片前的完整张量"做合并校验；② Trace.outputs 需要**未分块**的最终输出（to_verifier_io 直接消费） | recombination 若只存分片，合并结果的正确性无从证明；模型输出若只存分片，`trace.outputs` 无法重组完整 logits |
-| 4 | split layer handles | `trace_split_info.split_layer` 存在 | split 层的 lookup witness 与 boundary claims 证明 | split 层是切分的"缝合点"，其自身输入输出必须可独立取数 |
-| 5 | proving handles（`send_element`，i64） | 无条件；split 时改为逐 chunk 的新 proving handles | 每个算子的 prove 协议：softmax 的 shift_tensor、layernorm 的 mean/std_dev、logits 的 max_values 等都从 `ProvingHandle` 处取数（§5.3） | 证明需要的是**量化前辅助量**（如 softmax 的最大值表项），这些量不会出现在普通输出张量里；不发则对应算子无法生成 lookup witness |
-| 6 | 模型输入 handles | `trace_split_info.model_input_handles` | Trace.inputs 与首 chunk 的 Input 节点播种 | 输入是整条 claim 链的起点；缺输入则首层 input claim 无从校验 |
+| # | 数据                                     | 触发条件                                                                      | 消费方（谁最终会读它）                                                                                                                          | 为什么需要（缺了会怎样）                                                                                                             |
+| - | ---------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 1 | 输出 handle（`send` 原始 handle）      | 无条件——每个有出边的节点                                                    | ① 下游节点的懒加载（HandleLifetimeRunner 计数归零后 dry，下游再触发 store 重载）；② prove 阶段 `trace_step.output_tensor_at(port)` 的数据源 | 这是全图数据流的落盘基线。不发送则任何"内存副本被回收"或"跨进程 prove"场景下，该中间量永久不可达，Trace 退化为无肉的骨架             |
+| 2 | split 产出的 chunk handles               | 该节点被 chunk 切分（`trace_split_info.output_handles` 命中该 storage_key） | 各 chunk 的 `ChunkProver`：每个 chunk 只拿自己覆盖的输入切片                                                                                  | 切分后每 chunk 需要独立的张量分片落盘；不发则分布式/分块证明读不到分片                                                               |
+| 3 | 原（未切分）handle                       | ① 有 recombination layer；② 该输出同时是模型输出                            | ① recombination step 的证明需要"分片前的完整张量"做合并校验；② Trace.outputs 需要**未分块**的最终输出（to_verifier_io 直接消费）        | recombination 若只存分片，合并结果的正确性无从证明；模型输出若只存分片，`trace.outputs` 无法重组完整 logits                        |
+| 4 | split layer handles                      | `trace_split_info.split_layer` 存在                                         | split 层的 lookup witness 与 boundary claims 证明                                                                                               | split 层是切分的"缝合点"，其自身输入输出必须可独立取数                                                                               |
+| 5 | proving handles（`send_element`，i64） | 无条件；split 时改为逐 chunk 的新 proving handles                             | 每个算子的 prove 协议：softmax 的 shift_tensor、layernorm 的 mean/std_dev、logits 的 max_values 等都从 `ProvingHandle` 处取数（§5.3）        | 证明需要的是**量化前辅助量**（如 softmax 的最大值表项），这些量不会出现在普通输出张量里；不发则对应算子无法生成 lookup witness |
+| 6 | 模型输入 handles                         | `trace_split_info.model_input_handles`                                      | Trace.inputs 与首 chunk 的 Input 节点播种                                                                                                       | 输入是整条 claim 链的起点；缺输入则首层 input claim 无从校验                                                                         |
 
 三条设计原理贯穿上表：
 
@@ -331,22 +405,22 @@ layer.evaluate() ──▶ LayerOut ─ proving_data ──▶ ProvingHandle::ne
                                                 正常推理路径中随 RunOutput 一起被丢弃）
 ```
 
-| 字段 | 类型 | 服务对象 | 生命周期 |
-| --- | --- | --- | --- |
-| `outputs` | `Vec<WrappedTensor<T>>` | 图数据流（下游层输入 + trace 输出） | 与张量生命周期一致 |
-| `proving_data` | `ProvingData`（评估期）/ `ProvingHandle`（运行期） | 证明协议 | 落盘，prove 阶段取回 |
-| `tracked_layer_data` | `HashMap<TrackedDataId, WrappedTensor<T>>` | 量化校准器 | **仅校准运行中存活**，正常推理被丢弃 |
+| 字段                   | 类型                                                   | 服务对象                            | 生命周期                                   |
+| ---------------------- | ------------------------------------------------------ | ----------------------------------- | ------------------------------------------ |
+| `outputs`            | `Vec<WrappedTensor<T>>`                              | 图数据流（下游层输入 + trace 输出） | 与张量生命周期一致                         |
+| `proving_data`       | `ProvingData`（评估期）/ `ProvingHandle`（运行期） | 证明协议                            | 落盘，prove 阶段取回                       |
+| `tracked_layer_data` | `HashMap<TrackedDataId, WrappedTensor<T>>`           | 量化校准器                          | **仅校准运行中存活**，正常推理被丢弃 |
 
 `ProvingData`（provable/mod.rs:44-60）是证明辅助数据的枚举，六个变体逐一对应"证明该算子时除输入输出外还必须固定的中间量"：
 
-| 变体 | 承载数据 | 产生算子 | 证明期用途 |
-| --- | --- | --- | --- |
-| `Convolution(ConvFFTData)` | FFT 卷积中间量 | Conv | 卷积证明的频域一致性 |
-| `Softmax(SoftmaxData)` | LUT + shift tensor | Softmax | LogUp 查表证明的表与移位校验（§5.3） |
-| `LayerNorm(LayerNormProvingData)` | mean / std_dev | LayerNorm | 归一化查表证明的权重张量与统计量 |
-| `RMSNorm(RMSNormProvingData)` | RMS 统计量 | RMSNorm | 同上（RMS 变体） |
-| `ArgMax(ArgmaxData)` | `max_values`（每行最大值序列） | Logits | argmax 专用协议的比较链证明 |
-| `None` | — | einsum / requant 等无需额外数据的算子 | — |
+| 变体                                | 承载数据                         | 产生算子                              | 证明期用途                            |
+| ----------------------------------- | -------------------------------- | ------------------------------------- | ------------------------------------- |
+| `Convolution(ConvFFTData)`        | FFT 卷积中间量                   | Conv                                  | 卷积证明的频域一致性                  |
+| `Softmax(SoftmaxData)`            | LUT + shift tensor               | Softmax                               | LogUp 查表证明的表与移位校验（§5.3） |
+| `LayerNorm(LayerNormProvingData)` | mean / std_dev                   | LayerNorm                             | 归一化查表证明的权重张量与统计量      |
+| `RMSNorm(RMSNormProvingData)`     | RMS 统计量                       | RMSNorm                               | 同上（RMS 变体）                      |
+| `ArgMax(ArgmaxData)`              | `max_values`（每行最大值序列） | Logits                                | argmax 专用协议的比较链证明           |
+| `None`                            | —                               | einsum / requant 等无需额外数据的算子 | —                                    |
 
 `ProvingHandle`（provable/mod.rs:66-71）是运行期包装：`ProvingHandle::new(storage_key, proving_data, store)`（BaseRunner，mod.rs:219-221）把 `ProvingData` 中的每个张量登记为独立 handle 落盘，prove 阶段按 node_id 的 storage_key 取回。StoreRunner 对它走 `send_element`（§3.3 #5）。
 
@@ -424,11 +498,11 @@ for (data_id, handle) in layer_out.tracked_data.drain() {
 
 `track_intermediate_data`（quantization/strategy/llm_tracker.rs:159-170）把张量喂给三类累加器：
 
-| 累加器 | 键 | 用途 |
-| --- | --- | --- |
-| `intermediate_data_trackers` | `(NodeId, TrackedDataId)` | 逐节点逐数据的统计（min/max/均值），用于确定该节点输出的量化标度 |
-| `global_data_trackers` | `TrackedDataId` | **跨节点全局统计**——典型用途是激活函数：同一激活（如 GELU）在多处出现，其查表范围（table 的 min/max）必须取所有出现位置输入/输出的全局极值（llm_tracker.rs:26-27 注释明说"for working out suitable tables"） |
-| `accumulators` | `NodeOutput` | 节点输出本身的统计（HandleLifetimeRunner 同款编址） |
+| 累加器                         | 键                          | 用途                                                                                                                                                                                                                 |
+| ------------------------------ | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `intermediate_data_trackers` | `(NodeId, TrackedDataId)` | 逐节点逐数据的统计（min/max/均值），用于确定该节点输出的量化标度                                                                                                                                                     |
+| `global_data_trackers`       | `TrackedDataId`           | **跨节点全局统计**——典型用途是激活函数：同一激活（如 GELU）在多处出现，其查表范围（table 的 min/max）必须取所有出现位置输入/输出的全局极值（llm_tracker.rs:26-27 注释明说"for working out suitable tables"） |
+| `accumulators`               | `NodeOutput`              | 节点输出本身的统计（HandleLifetimeRunner 同款编址）                                                                                                                                                                  |
 
 **为什么需要这条独立通道**：量化策略推导（尤其 LLM 的 activation 表定界）需要的是**前向过程中的真实激活分布**，而这些中间量要么不在任何层的输出里（如激活函数的输入），要么散布在全图各处需要跨节点聚合。把"校准所需数据"作为层的自描述元数据（层自己声明 track 什么、用什么 id），量化框架就能零耦合地收集——新增算子只需实现 `tracked_*_data_id`。
 
@@ -442,12 +516,23 @@ for (data_id, handle) in layer_out.tracked_data.drain() {
 
 模型图的所有连接都通过"节点 id + 端口号"编址（graph.rs:213-235）：
 
-| 类型 | 定义 | 语义 |
-| --- | --- | --- |
-| `NodeId(usize)` | 拓扑序号（display 为 `N{x}`） | 节点唯一标识 |
-| `NodeOutput(NodeId, port)` | 某节点的第 port 个输出（display 为 `N{x}_{port}`） | 数据流的**源**端点 |
-| `NodeInput(NodeId, port)` | 某节点的第 port 个输入 | 数据流的**汇**端点 |
-| `PortId` | 端口号的强类型包装 | 多输入算子（如 GLU 双输入、attention 的 Q/K/V）靠 port 区分 |
+| 类型              | 定义                                                                                                                                              | 语义                                                       |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `NodeId(usize)` | 拓扑序号（display 为 `N{x}`，graph.rs:196 起）                                                                                                  | 节点唯一标识                                               |
+| `NodeOutput`    | `NodePort<Output>` 的类型别名（graph.rs:113-155），字段 `{node_id, port}`；display 为 `Output: N{x}->:{port}`（graph.rs:141-150 手写 impl） | 数据流的**源**端点——数据从输出口**流出**     |
+| `NodeInput`     | `NodePort<Input>` 的类型别名，同构                                                                                                              | 数据流的**汇**端点——数据从输入口**流入**     |
+| `PortId(usize)` | 端口号的强类型包装（graph.rs:279，display `:{_0}`）                                                                                             | 多端口算子（如 GLU 双输入）靠 port 区分"进的/出的是哪个口" |
+| `PortLink`      | `{source_port, target_port}`（graph.rs:286）                                                                                                    | 一条边内一对端口的连接                                     |
+| `Feed`          | `{source: NodeOutput, target: NodeInput}`（graph.rs:164）                                                                                       | 展平后的一条完整连线                                       |
+
+**源/汇是"连接"的属性而非节点的属性**：数据自输出端口流出（源头）、流入输入端口（汇点）。同一节点在被上游喂的连线里是汇（`N5.0 → N9.0`），在喂下游的连线里是源（`N9.0 → N12.0`）。一条典型连线：
+
+```text
+Edge { source: N3, target: N4, ports: [Link { source_port: 0, target_port: 0 }] }
+  展平为  Feed { source: NodeOutput(N3, 0), target: NodeInput(N4, 0) }
+  语义：einsum(N3) 的第 0 个输出张量，从 N3 的 0 号输出口流出，
+        流入 softmax(N4) 的 0 号输入口
+```
 
 编址的**串联机制**是一条纯格式化链：
 
@@ -455,16 +540,17 @@ for (data_id, handle) in layer_out.tracked_data.drain() {
 图 3  从图连接到磁盘寻址的完整链条
 
   Edge { source: NodeId, target: NodeId,
-         ports: Vec<link { source_port, target_port }> }   graph.rs
+         ports: Vec<PortLink { source_port, target_port }> }   graph.rs:335-345
       │  一条边可携带多个端口连接（多输出扇出）
       ▼
-  Feed { source: NodeOutput(N5,1), target: NodeInput(N9,0) }   graph.rs:518-556
-      │  incoming/outgoing_feeds: 把边按 port 排序展平成 Feed 列表
+  Feed { source: NodeOutput(N3,0), target: NodeInput(N4,0) }   graph.rs:518-556
+      │  incoming/outgoing_feeds: 把边按"本节点端口"排序展平成 Feed 列表
       ▼
-  NodeOutput.to_storage_key() = format!("N5_1")                mod.rs:1107-1112
-      │  字符串化 = store 寻址键
+  NodeOutput.to_storage_key() = format!("{self}")              mod.rs:1107-1112
+      │  Display（graph.rs:141-150）输出 "Output: N3->:0"
+      │  = 由 PortType("Output") + NodeId("N3") + PortId(":0") 三段拼成
       ▼
-  GenStore page "N5_1" ──▶ handle.load() ──▶ 下游层输入
+  GenStore page "Output: N3->:0" ──▶ handle.load() ──▶ 下游层输入
 ```
 
 关键点：**端口号同时承担两个角色**——图中"第几个输出/输入"的拓扑角色，以及 store 中"哪个文件页"的寻址角色。二者靠 `format!("{self}")` 这一格式化约定绑死，因此 INV-8（端口稳定性）成立。
@@ -475,20 +561,35 @@ for (data_id, handle) in layer_out.tracked_data.drain() {
 
 ```rust
 pub(crate) fn outgoing_ports(&self, n: NodeId) -> Vec<NodeOutput> {
-    // 收集 n 的所有出边上的 link.source_port → n.output_at(port)
-    // 按 port 数值排序，去重
+    let mut outgoings = self
+        .outgoings(n)                                  // ① 找出 n 的所有出边
+        .flat_map(|(_, edge)| edge.ports().iter())     // ② 摊开每条边上的端口连接
+        .map(|link| n.output_at(link.source_port))     // ③ source_port → NodeOutput{n, port}
+        .collect::<Vec<_>>();                          // ④ 收集
+    outgoings.sort_by_key(|output| output.port);       // ⑤ 按端口号排序
+    outgoings.dedup();                                 // ⑥ 去重（只删相邻重复）
+    outgoings
 }
 ```
 
-逐层拆解：
+| 步 | 做什么                                                                                                                                 | 代码依据                  |
+| -- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| ① | `outgoings(n)` = `neighbors(n, Outgoing)`：**线性扫描全图边表** `edges: BTreeMap<EdgeId, Edge>`，过滤 `edge.source == n` | graph.rs:834-846、424-437 |
+| ② | 每条边内含 `ports: Vec<PortLink>`（一条边可携带多个端口连接），全部摊开                                                              | graph.rs:286、335-345     |
+| ③ | 只取每个连接的 `source_port`（我自己这端的口号），包成 `NodeOutput(n, port)`                                                       | graph.rs:226-231          |
+| ⑤ | 按 port **数值**排序                                                                                                             | —                        |
+| ⑥ | `dedup()` 只删除**相邻**的重复项——必须先排序它才有意义                                                                       | —                        |
 
-1. 遍历以 n 为 source 的全部边；
-2. 对每条边的每个端口连接取 `source_port`，构造成 `NodeOutput(n, port)`；
-3. **按 port 排序并去重**后返回。
+**走查示例**。设节点 N5 有两条出边，注意建边顺序（EdgeId 是自增序号）：
 
-为什么需要排序去重：边的存储顺序由图构建过程决定（不保证 port 升序），而下游消费方（BaseRunner）需要把 `layer_out.outputs[i]` 与"第 i 个输出端口"对齐——这个对齐关系只能靠 port 数值序建立。去重处理的是多边共享同一输出端口（扇出）的情况：一个输出喂多个下游时，它在端口列表里只应出现一次。
+```text
+Edge#3 : N5 → N7, ports = [Link{0→0}, Link{0→1}]   （N5.0 扇出到 N7 的两个输入口）
+Edge#17: N5 → N9, ports = [Link{1→0}]
+```
 
-BaseRunner 的消费（mod.rs:209-217）：
+①按 EdgeId 升序发现 `[Edge#3, Edge#17]` → ②③收集得 `[N5.0, N5.0, N5.1]` → ⑤排序 `[N5.0, N5.0, N5.1]` → ⑥去重 `[N5.0, N5.1]`。
+
+BaseRunner 拿它与层输出 izip（mod.rs:209-217）：
 
 ```rust
 let out_ports = graph.outgoing_ports(node_id);
@@ -497,14 +598,18 @@ for (port, out_shape, tensor) in izip!(&out_ports, &out_shapes, layer_out.output
 
 三者 izip：**第 i 个输出张量 × 第 i 个输出端口 × 第 i 个输出形状** → `port.to_storage_key()` 作为 handle 的 key。这就是"层输出的顺序语义"的定义点：层实现者按 `OpInfo::output_shapes` 的约定顺序产出，图按端口序收货。
 
+**为什么必须排序——迭代顺序是"插入顺序"，与端口号无关。** ①那一步的遍历容器是 `BTreeMap<EdgeId, Edge>`，键 `EdgeId(usize)` 是建边时**自增分配的序号**（graph.rs:259）。即"N5 的出边按什么顺序被扫出来"取决于**边何时被 add 进图**：解析器建图、padding 插边、chunking 加 Split/Recombination 边……谁先 add 谁的 EdgeId 小。这个顺序与端口号**没有任何对应关系**——完全可能出现 port 1 挂在先建的 Edge#3、port 0 挂在后建的 Edge#17（正是上例）。若不排序直接 izip，BaseRunner 会把 `outputs[0]` 存进 N5.1 的 key——0 号输出被贴上 1 号输出的标签落盘，下游按 port 0 取数时整条数据流**静默错位**；且错位关系是建边历史的函数，任何图变换都可能悄悄改变它。排序后顺序只依赖 port 数值——port 才是"层第 i 个输出"的语义定义（`OpInfo` 约定），由层契约保证稳定。一句话：**把正确性从"依赖构建顺序"迁移到"依赖语义约定"**。
+
+**为什么必须去重——扇出让同一端口出现多次。** 上例中 N5.0 出现两次（它同时喂 N7 的两个输入口），但 `layer_out.outputs` 里每个端口只有一个张量，izip 要求两边 1:1，故端口列表必须去重。`dedup()` 只删相邻重复，"先排序再去重"的次序不可颠倒。对照：feeds 系列**故意不去重**（见 §3.7.3）——每条连线都是真实数据流。另见 feeds 源码中的 `// TODO: check that all are consecutive`（graph.rs:533/555）：端口连续性目前是约定而非校验。
+
 #### 3.7.3 feeds 家族与各 Runner 的分工
 
-| 函数 | 位置 | 返回 | 消费者 |
-| --- | --- | --- | --- |
-| `outgoing_ports(n)` | graph.rs:882 | `Vec<NodeOutput>`（排序去重） | BaseRunner：outputs → storage_key |
-| `outgoing_feeds(n)` | graph.rs:538 | `Vec<Feed>`（按 port 排序展平） | StoreRunner：输出 × feed 配对发送（§3.3）；TraceRunner：模型输出收集 |
-| `incoming_feeds(n)` | graph.rs:518 | `Vec<Feed>`（按 port 排序展平） | HandleLifetimeRunner：查上游 storage_key 组装 RunInput |
-| `output_at(port)` / `input_at(port)` | graph.rs:226-235 | 单端点构造器 | 各处的端点字面量构造 |
+| 函数                                     | 位置             | 返回                              | 消费者                                                                 |
+| ---------------------------------------- | ---------------- | --------------------------------- | ---------------------------------------------------------------------- |
+| `outgoing_ports(n)`                    | graph.rs:882     | `Vec<NodeOutput>`（排序去重）   | BaseRunner：outputs → storage_key                                     |
+| `outgoing_feeds(n)`                    | graph.rs:538     | `Vec<Feed>`（按 port 排序展平） | StoreRunner：输出 × feed 配对发送（§3.3）；TraceRunner：模型输出收集 |
+| `incoming_feeds(n)`                    | graph.rs:518     | `Vec<Feed>`（按 port 排序展平） | HandleLifetimeRunner：查上游 storage_key 组装 RunInput                 |
+| `output_at(port)` / `input_at(port)` | graph.rs:226-235 | 单端点构造器                      | 各处的端点字面量构造                                                   |
 
 三个 Runner 分别消费 feeds 家族的三个投影，形成完整闭环：
 
@@ -516,7 +621,71 @@ BaseRunner           ── outgoing_ports ──▶ "我的输出叫什么 key"
 StoreRunner          ── outgoing_feeds ──▶ "我的输出喂给谁"（含"是否模型输出"判断）
 ```
 
-**为什么 StoreRunner 用 feeds 而 BaseRunner 用 ports**：BaseRunner 只关心"我的第 i 个输出是什么 key"——ports 足矣；StoreRunner 还要判断某输出是否直连模型输出节点（mod.rs:653-663，决定是否为 trace.outputs 额外保存原值）——这需要 Feed 的 target 端信息，ports 里没有。两条 API 的信息密度差异正是分工的依据。
+**feeds 与 ports 的三点差异（读懂二者的关键）**：
+
+|          | `outgoing_ports`                                      | `outgoing_feeds` / `incoming_feeds`                                                                                                                       |
+| -------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 保留什么 | 只有**本端**端口（`NodeOutput(n, port)`）       | **双端都保留**：`Feed { source: 谁的哪个输出口, target: 谁的哪个输入口 }`——一条 Feed 就是一条完整连线                                               |
+| 排序键   | 本节点的 port                                           | 同样是**本节点的端口**：`incoming_feeds` 按 `feed.target.port`、`outgoing_feeds` 按 `feed.source.port` 排——展平后第 i 项 ↔ 本节点第 i 个端口 |
+| 去重？   | **去重**（与层输出张量 1:1 对齐，每端口一个张量） | **不去重**（每条连线都是真实数据流；N5.0 同时喂 N7 与 N9 时是**两条** Feed，丢任何一条都断流）                                                    |
+
+**走查示例**（简化自 transformer 残差结构；建边顺序刻意与端口号错开以演示排序效果）：
+
+```text
+图 4a  示例图：两次残差汇合 + 一次扇出
+
+  N2(attention einsum) ──────┐
+                             ├──▶ N5(Add 残差汇合) ─▶ N8(LayerNorm) ─▶ N9(einsum FFN) ─┐
+  N1(残差直连) ──────────────┘                                                        ├──▶ N12(Add 残差汇合)
+  N5 ──────────────────────────────────────────────────────────────────────────────────┘
+
+  建边记录（EdgeId 自增，插入顺序与端口号无关）：
+    Edge#12: N2 → N5, ports=[Link{0→1}]   先建，进 N5 的 1 号输入口
+    Edge#30: N1 → N5, ports=[Link{0→0}]   后建，进 N5 的 0 号输入口
+    Edge#41: N5 → N8, ports=[Link{0→0}]
+    Edge#44: N5 → N12, ports=[Link{0→1}]  N5.0 扇出：同时喂 N8 与 N12
+```
+
+**`incoming_feeds(N5)`**（N5 是第一个 Add，两个输入口）：
+
+```text
+① incomings(N5) 按 EdgeId 序发现：先 Edge#12，后 Edge#30
+② 展平（插入序）：
+     [ Feed{N2.0 → N5.1}, Feed{N1.0 → N5.0} ]
+③ sort_by_key(feed.target.port)（graph.rs:533）后：
+     [ Feed{N1.0 → N5.0}, Feed{N2.0 → N5.1} ]   ← 顺序被纠正为端口序
+```
+
+消费方 HandleLifetimeRunner 据此组装 `RunInput`：第 i 个输入 handle = 第 i 条 Feed 的 `source` 所指张量——`input_handles[0]` = N1 的输出（0 号口）、`input_handles[1]` = N2 的输出（1 号口）。若没有排序，Add 的两个输入将按插入序错位；对可交换的 Add 只是侥幸不出错，换成不可交换的双输入算子（如 GLU 的主输入/门控）就是数值错误。
+
+**`outgoing_feeds(N5)`**（N5 的输出扇出到 N8 与 N12）：
+
+```text
+① outgoings(N5) 按 EdgeId 序发现：Edge#41 → Edge#44
+② 展平：
+     [ Feed{N5.0 → N8.0}, Feed{N5.0 → N12.1} ]
+③ sort_by_key(feed.source.port) 后不变（两条都是 0 号口）：
+     [ Feed{N5.0 → N8.0}, Feed{N5.0 → N12.1} ]
+```
+
+关键观察：**N5.0 出现了两次，两条 Feed 都保留（不去重）**——它们是两条真实连线。对照 `outgoing_ports(N5)` 返回 `[N5.0]`（去重后一条）。
+
+三个消费方对同一组 feeds 的三种用法：
+
+| 消费方                               | 用法                                                                                                                       | 扇出行为                                                                                                                                                  |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HandleLifetimeRunner（对下游 N9）    | `incoming_feeds(N9)` = `[Feed{N8.0→N9.0}]` → 按序组装 `RunInput`                                                   | 一对一                                                                                                                                                    |
+| TraceRunner（对 N5，mod.rs:880-889） | **逐条遍历**（`for feed in outgoing_feeds`），按 `feed.source.port` 索引输出张量：`outputs[*feed.source.port]` | **扇出安全**：每条连线都检查 target 是否模型输出节点                                                                                                |
+| StoreRunner（对 N5，mod.rs:612）     | `outputs.iter().zip(outgoing_feeds(N5))`：**位置配对**。outputs 只有 1 个张量，feeds 有 2 条 → zip 只产生 1 对    | 同一 handle（同 storage_key）本就只需发送一次即可落盘，多余连线不触发重复发送；`is_output` 判断只作用于配对到的连线（模型输出节点在图构建时是终端汇点） |
+
+**消费走查**（谁在用、用完干什么）：
+
+- **HandleLifetimeRunner.run_layer**（mod.rs:1046 起）：`incoming_feeds(node_id)` → 对每条 Feed 取 `feed.source` 的 storage_key（上游输出张量的 key）→ 从 registry 克隆 handle → 按顺序组装 `RunInput`。效果：**层收到的第 i 个输入 handle = 本节点第 i 号输入口的数据**——这是"层输入顺序"的定义点；
+- **StoreRunner.run_layer**（mod.rs:625-665）：`outputs.zip(outgoing_feeds(node_id))` → 有了 Feed 才能问 `feed.target.node_id` 是否为模型输出节点，决定是否为 `trace.outputs` 额外保存原值；
+- **TraceRunner**（mod.rs:864-886）：同样扫 feeds 找"目标节点是 Output"的连线，据此收集 `trace.outputs`；
+- 辅助件：`Edge::feeds()`（graph.rs:347-358）是单条边内部的同款展开；`order_by_in_port`（graph.rs:171-183）是"按输入口排序后剥掉端口标签"的通用工具，供密码学代码把乱序产物规整为按端口序的向量。
+
+**为什么 StoreRunner 用 feeds 而 BaseRunner 用 ports**：BaseRunner 只关心"我的第 i 个输出是什么 key"——ports 足矣；StoreRunner 还要判断某输出是否直连模型输出节点——这需要 Feed 的 target 端信息，ports 里没有。两条 API 的信息密度差异正是分工的依据。
 
 **不变式支撑**：该机制的正确性依赖"端口号与层输出顺序一一对应且全图稳定"，登记为 INV-8（§6）。
 
@@ -531,6 +700,7 @@ StoreRunner          ── outgoing_feeds ──▶ "我的输出喂给谁"（�
 1. **拓扑序单遍**：`graph.forward_inners()` 给出节点执行序列（transformer 展开后 259 节点），依序驱动，无递归、无重放；
 2. **数据流隐式衔接**：上游输出 handle 注册进 HandleLifetimeRunner 的 registry；下游由外壳按 feed 查表供给输入，运行时不存在额外的中间缓冲搬运；
 3. **三线并行**：每个节点在"返回路径"上同时触发三件事——
+
    - 计算继续（下一节点开始 evaluate）；
    - 数据落盘（StoreRunner 已发通道，后台线程异步消费）；
    - 内存释放（输入计数归零 → dry）。
@@ -595,10 +765,10 @@ prompt [L tokens]
 
 heavy run 之后执行两组断言（llm.rs:574-640），作为"增量 cache 前向与全量前向数值等价"的运行时校验：
 
-| 断言 | 内容 | 意义 |
-| --- | --- | --- |
-| 移位校验 | `trace.outputs[0][i-1] == trace.inputs[0][i]`，对全部生成区间 | 全量前向的输出应与输入的因果移位一致 |
-| argmax 校验 | 若移位校验失败，取 argmax 步的 logits 行做 top-1 复核 | 区分"数值错误"与"top-1 并列引发的合法歧义"，断言信息含该行排序后的前 10 值 |
+| 断言        | 内容                                                            | 意义                                                                       |
+| ----------- | --------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 移位校验    | `trace.outputs[0][i-1] == trace.inputs[0][i]`，对全部生成区间 | 全量前向的输出应与输入的因果移位一致                                       |
+| argmax 校验 | 若移位校验失败，取 argmax 步的 logits 行做 top-1 复核           | 区分"数值错误"与"top-1 并列引发的合法歧义"，断言信息含该行排序后的前 10 值 |
 
 ---
 
@@ -612,10 +782,10 @@ heavy run 之后执行两组断言（llm.rs:574-640），作为"增量 cache 前
 
 `ChunkingStrategy`（chunking.rs:969-986）约定两个方法：`ideal_num_chunks`（决定切多少块）与 `split`（实际切分）。两种实现：
 
-| 策略 | 位置 | 切分逻辑 | 适用场景 |
-| --- | --- | --- | --- |
-| `DefaultChunkingStrategy` | chunking.rs:1000 起 | 简单按连续节点切，约 3 节点/chunk | 通用 CNN 类模型 |
-| `LLMChunkingStrategy` | chunking.rs:1710 起 | **按 Add 节点切分**：Add 是残差汇合点，必须整体落在同一 chunk（否则 Add 的两个输入分属不同 chunk，需要额外合并证明）；同时允许 einsum/logits **横向切分**（大矩阵乘按行切给多个 chunk 并行证明） | Transformer：attention 层多、einsum 体积大 |
+| 策略                        | 位置                | 切分逻辑                                                                                                                                                                                                     | 适用场景                                   |
+| --------------------------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------ |
+| `DefaultChunkingStrategy` | chunking.rs:1000 起 | 简单按连续节点切，约 3 节点/chunk                                                                                                                                                                            | 通用 CNN 类模型                            |
+| `LLMChunkingStrategy`     | chunking.rs:1710 起 | **按 Add 节点切分**：Add 是残差汇合点，必须整体落在同一 chunk（否则 Add 的两个输入分属不同 chunk，需要额外合并证明）；同时允许 einsum/logits **横向切分**（大矩阵乘按行切给多个 chunk 并行证明） | Transformer：attention 层多、einsum 体积大 |
 
 LLM 策略的设计权衡（chunking.rs:1704-1709 注释）：Add 整块化避免多重承诺，代价是 attention 层不能跨 chunk 切——只要 attention 层数够多、chunk 数够用，这个代价可接受。
 
@@ -698,20 +868,20 @@ full_trace ─▶ [SplitNode] ──chunk_trace_0──▶ [ChunkProver #0] ─�
 
 阶段 6 中 `op.prove()` 的分派表（协议粒度，数学细节不在本档范围）：
 
-| 算子 | 协议 | 消费的 trace 数据 | 消费的 proving_data | 代码 |
-| --- | --- | --- | --- | --- |
-| EinSum | **sumcheck**（dp-crypto `IOPProverState`，对 einsum 表达式逐变量折叠） | 输入/输出张量（MLE） | 无（`ProvingData::None`） | einsum/prove.rs:41 起 |
-| Softmax | **LogUp** 查表 + linking sumcheck + **shift check** | 输入张量 | `SoftmaxData`（LUT、shift_tensor） | softmax/prove.rs:11 |
-| LayerNorm | LogUp 查表（带权重张量变体） | 输入张量 | `LayerNormProvingData`（mean/std_dev） | layernorm/prove.rs |
-| RMSNorm | 同上（RMS 变体） | 输入张量 | `RMSNormProvingData` | rmsnorm/prove.rs |
-| Activation | LogUp 查表 | 输入张量 | 无（表由量化期定界） | generic_prove.rs:66 |
-| AttentionMask | LogUp 查表 | 输入张量 | 无 | attention_mask/mod.rs:299 |
-| Logits(argmax) | **argmax 专用协议**（比较链 + max_values 承诺） | logits 输出 | `ArgmaxData.max_values` | logits.rs:519 |
-| Embeddings | 查表 | 输入 token id | 权重为常量 | embeddings.rs:366 |
-| Positional | 查表 | 输入 | 常量表 | positional/mod.rs:680 |
-| Requant | **shift check**（移位溢出校验） | 输入张量 | 无 | requant/prove.rs |
-| Hadamard | 乘积论证 | 输入/输出 | 无 | hadamard.rs:93 |
-| Split / Recombination | 切分/合并一致性（claim 重映射与合并） | 分片张量 | — | prover.rs:823-829 透传分支 |
+| 算子                  | 协议                                                                           | 消费的 trace 数据    | 消费的 proving_data                      | 代码                       |
+| --------------------- | ------------------------------------------------------------------------------ | -------------------- | ---------------------------------------- | -------------------------- |
+| EinSum                | **sumcheck**（dp-crypto `IOPProverState`，对 einsum 表达式逐变量折叠） | 输入/输出张量（MLE） | 无（`ProvingData::None`）              | einsum/prove.rs:41 起      |
+| Softmax               | **LogUp** 查表 + linking sumcheck + **shift check**                | 输入张量             | `SoftmaxData`（LUT、shift_tensor）     | softmax/prove.rs:11        |
+| LayerNorm             | LogUp 查表（带权重张量变体）                                                   | 输入张量             | `LayerNormProvingData`（mean/std_dev） | layernorm/prove.rs         |
+| RMSNorm               | 同上（RMS 变体）                                                               | 输入张量             | `RMSNormProvingData`                   | rmsnorm/prove.rs           |
+| Activation            | LogUp 查表                                                                     | 输入张量             | 无（表由量化期定界）                     | generic_prove.rs:66        |
+| AttentionMask         | LogUp 查表                                                                     | 输入张量             | 无                                       | attention_mask/mod.rs:299  |
+| Logits(argmax)        | **argmax 专用协议**（比较链 + max_values 承诺）                          | logits 输出          | `ArgmaxData.max_values`                | logits.rs:519              |
+| Embeddings            | 查表                                                                           | 输入 token id        | 权重为常量                               | embeddings.rs:366          |
+| Positional            | 查表                                                                           | 输入                 | 常量表                                   | positional/mod.rs:680      |
+| Requant               | **shift check**（移位溢出校验）                                          | 输入张量             | 无                                       | requant/prove.rs           |
+| Hadamard              | 乘积论证                                                                       | 输入/输出            | 无                                       | hadamard.rs:93             |
+| Split / Recombination | 切分/合并一致性（claim 重映射与合并）                                          | 分片张量             | —                                       | prover.rs:823-829 透传分支 |
 
 所有查表类算子共享同一骨架 `prove_lookup_op`（generic_prove.rs:66）：取阶段 2 承诺的层多项式 → 构造 LogUp 约束 → linking sumcheck 把"表内命中"与"输出 claim"绑定 → shift 校验（对 requant/softmax 的定点移位正确性）→ 返回输入 claim。
 
@@ -719,14 +889,14 @@ full_trace ─▶ [SplitNode] ──chunk_trace_0──▶ [ChunkProver #0] ─�
 
 trace 在 prove 阶段的全部消费触点（排重后）：
 
-| 消费点 | 位置 | 读什么 | 用途 |
-| --- | --- | --- | --- |
-| SplitNode 切分 | prover_graph.rs:177 | full_trace 整体 | `chunk_trace(&full_trace)` 抽子 trace |
-| witness 生成 | context.rs:224 起 | 每 step 的输入/输出 + proving handle | LogUp 多重性多项式、层输出承诺 |
-| 输出 claims | prover.rs:628-664 | `output_tensor_at(port)` | 锚点承诺 |
-| 出边 claims | prover.rs:673-711 | `output_tensor_at(source_port)` | 跨 chunk 公共点求值 |
-| 反拓扑主循环 | prover.rs:750-753 | `section.output_tensors()` | 每层 prove 的 witness |
-| verifier IO | trace.rs:311 `to_verifier_io` | trace.inputs/outputs | pad + fieldize 产出 `IO{input, output}` |
+| 消费点         | 位置                            | 读什么                               | 用途                                      |
+| -------------- | ------------------------------- | ------------------------------------ | ----------------------------------------- |
+| SplitNode 切分 | prover_graph.rs:177             | full_trace 整体                      | `chunk_trace(&full_trace)` 抽子 trace   |
+| witness 生成   | context.rs:224 起               | 每 step 的输入/输出 + proving handle | LogUp 多重性多项式、层输出承诺            |
+| 输出 claims    | prover.rs:628-664               | `output_tensor_at(port)`           | 锚点承诺                                  |
+| 出边 claims    | prover.rs:673-711               | `output_tensor_at(source_port)`    | 跨 chunk 公共点求值                       |
+| 反拓扑主循环   | prover.rs:750-753               | `section.output_tensors()`         | 每层 prove 的 witness                     |
+| verifier IO    | trace.rs:311 `to_verifier_io` | trace.inputs/outputs                 | pad + fieldize 产出 `IO{input, output}` |
 
 **结论**：trace 的消费模式是"**按 step 惰性水合、按算子协议取数**"——每个 chunk 只触碰自己的子 trace，每层只在 prove 时把所需张量从 store 拉回内存（local 模式下 LRU 命中即免 IO）。这解释了 G 文档的实测结论：prove 阶段的 IO 模式与 trace 生成时的 store 写入模式严格互补。
 
@@ -746,84 +916,91 @@ trace 在 prove 阶段的全部消费触点（排重后）：
 
 以下不变式是上述机制正确性的隐含前提，修改任一组件时须重新核对：
 
-| 编号 | 不变式 | 依据 |
-| --- | --- | --- |
-| INV-1 | dry 不得破坏后台写盘：dry 仅清除共享内部副本，StoreRunner 的克隆具有独立引用计数 | mod.rs:499-505 注释 |
-| INV-2 | 模型输出 handle 的使用计数恒大于 0，不因引用耗尽被 dry | 构造时对输出节点预 +1（mod.rs:931-949） |
-| INV-3 | storage_key 允许跨轮复用：LLM 多轮 run 的 handle 覆盖与计数刷新由 `model_inputs` 完成 | mod.rs:1002-1044、1084-1090 |
-| INV-4 | 图输出的索引必须连续且从 0 开始 | `build_trace_outputs` 断言（mod.rs:828-836） |
-| INV-5 | 推理一律使用 unpadded 张量，pad 只发生在 proving 层 | llm.rs:444 注释、BaseRunner 形状预计算约定 |
-| INV-6 | run 函数返回时 store 已全量落盘 | `StoreRunner::Drop` 的排空 + join 语义 |
-| INV-7 | 增量步（cache 前向）与全量前向数值等价 | llm.rs:574 起的移位 / argmax 双断言 |
-| INV-8 | 端口号与层输出顺序一一对应且全图稳定：`outgoing_ports` 的排序去重 + BaseRunner 的 izip 共同保证 `outputs[i] ↔ port_i ↔ storage_key` | graph.rs:882、mod.rs:209-217、mod.rs:1107-1112 |
-| INV-9 | claim 反向传播的正确性依赖反拓扑序：下游 claim 必须先于上游节点被登记（`backward_iter` 顺序保证） | prover.rs:717-853、claims 登记以 `NodeInput(node_id, i)` 为键（prover.rs:840-846） |
-| INV-10 | 跨 chunk 一致性由"公共挑战点 + 承诺 id 绑定 + transcript 绑定"三件套保证，无需 chunk 间通信 | prover.rs:697-705、chunking.rs:696-712、prover.rs:600 |
-| INV-11 | tracked_layer_data 仅在量化校准运行中被消费（TrackerRunner），正常推理不读取、不持久化 | mod.rs:710、provable/mod.rs:213 |
+| 编号   | 不变式                                                                                                                                    | 依据                                                                                 |
+| ------ | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| INV-1  | dry 不得破坏后台写盘：dry 仅清除共享内部副本，StoreRunner 的克隆具有独立引用计数                                                          | mod.rs:499-505 注释                                                                  |
+| INV-2  | 模型输出 handle 的使用计数恒大于 0，不因引用耗尽被 dry                                                                                    | 构造时对输出节点预 +1（mod.rs:931-949）                                              |
+| INV-3  | storage_key 允许跨轮复用：LLM 多轮 run 的 handle 覆盖与计数刷新由 `model_inputs` 完成                                                   | mod.rs:1002-1044、1084-1090                                                          |
+| INV-4  | 图输出的索引必须连续且从 0 开始                                                                                                           | `build_trace_outputs` 断言（mod.rs:828-836）                                       |
+| INV-5  | 推理一律使用 unpadded 张量，pad 只发生在 proving 层                                                                                       | llm.rs:444 注释、BaseRunner 形状预计算约定                                           |
+| INV-6  | run 函数返回时 store 已全量落盘                                                                                                           | `StoreRunner::Drop` 的排空 + join 语义                                             |
+| INV-7  | 增量步（cache 前向）与全量前向数值等价                                                                                                    | llm.rs:574 起的移位 / argmax 双断言                                                  |
+| INV-8  | 端口号与层输出顺序一一对应且全图稳定：`outgoing_ports` 的排序去重 + BaseRunner 的 izip 共同保证 `outputs[i] ↔ port_i ↔ storage_key` | graph.rs:882、mod.rs:209-217、mod.rs:1107-1112                                       |
+| INV-9  | claim 反向传播的正确性依赖反拓扑序：下游 claim 必须先于上游节点被登记（`backward_iter` 顺序保证）                                       | prover.rs:717-853、claims 登记以 `NodeInput(node_id, i)` 为键（prover.rs:840-846） |
+| INV-10 | 跨 chunk 一致性由"公共挑战点 + 承诺 id 绑定 + transcript 绑定"三件套保证，无需 chunk 间通信                                               | prover.rs:697-705、chunking.rs:696-712、prover.rs:600                                |
+| INV-11 | tracked_layer_data 仅在量化校准运行中被消费（TrackerRunner），正常推理不读取、不持久化                                                    | mod.rs:710、provable/mod.rs:213                                                      |
 
 ---
 
 ## 7 已知限制与权衡
 
-| 编号 | 限制 / 权衡 | 说明 | 影响评估 |
-| --- | --- | --- | --- |
-| L-1 | dry 推迟显存释放 | 后台线程持有克隆引用，设备内存释放延后到数据消费完成 | 显存峰值可能高于理论活跃集；长上下文时需关注 |
-| L-2 | 每节点固定调度开销 | 每层调用穿行四层 Runner：查表组装输入、克隆 handle 发通道 | 与算子计算量相比目前可忽略；若算子计算被大幅优化（如多核并行化 GEMM），此开销将成为新的可测量项 |
-| L-3 | 结果通道容量固定为 10 | `sync_channel(10)` 的背压在 token 生成速度极快时可能短暂阻塞调度 | 影响有限；如需更高吞吐可评估调整容量 |
-| L-4 | trace 记账与数据解耦的双面性 | Trace 仅含引用，跨进程消费必须依赖 store 可达或单文件内嵌 | 决定了持久化方案的设计空间（单文件 vs store 重建） |
-| L-5 | LLM 计数刷新依赖 `model_inputs` 被按时调用 | 若新增 Runner 在多轮场景下绕过该钩子，引用计数将失衡 | 扩展时的强制约定 |
-| L-6 | chunk 切分受 Add 节点约束：残差汇合点必须整块落在同一 chunk，attention/einsum 不能跨 chunk 任意切 | LLMChunkingStrategy 的设计权衡（chunking.rs:1704-1709） | chunk 数上限受制于 Add 节点分布；模型结构变化时需复核策略 |
-| L-7 | prove 阶段要求 chunk 内每个节点的 trace step 必须存在且可水合 | `get_step` 失败即 bail（prover.rs:639-643、720-722） | trace 与 chunk 结构必须同步生成；手工裁剪 trace 会导致证明失败 |
+| 编号 | 限制 / 权衡                                                                                       | 说明                                                               | 影响评估                                                                                        |
+| ---- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| L-1  | dry 推迟显存释放                                                                                  | 后台线程持有克隆引用，设备内存释放延后到数据消费完成               | 显存峰值可能高于理论活跃集；长上下文时需关注                                                    |
+| L-2  | 每节点固定调度开销                                                                                | 每层调用穿行四层 Runner：查表组装输入、克隆 handle 发通道          | 与算子计算量相比目前可忽略；若算子计算被大幅优化（如多核并行化 GEMM），此开销将成为新的可测量项 |
+| L-3  | 结果通道容量固定为 10                                                                             | `sync_channel(10)` 的背压在 token 生成速度极快时可能短暂阻塞调度 | 影响有限；如需更高吞吐可评估调整容量                                                            |
+| L-4  | trace 记账与数据解耦的双面性                                                                      | Trace 仅含引用，跨进程消费必须依赖 store 可达或单文件内嵌          | 决定了持久化方案的设计空间（单文件 vs store 重建）                                              |
+| L-5  | LLM 计数刷新依赖 `model_inputs` 被按时调用                                                      | 若新增 Runner 在多轮场景下绕过该钩子，引用计数将失衡               | 扩展时的强制约定                                                                                |
+| L-6  | chunk 切分受 Add 节点约束：残差汇合点必须整块落在同一 chunk，attention/einsum 不能跨 chunk 任意切 | LLMChunkingStrategy 的设计权衡（chunking.rs:1704-1709）            | chunk 数上限受制于 Add 节点分布；模型结构变化时需复核策略                                       |
+| L-7  | prove 阶段要求 chunk 内每个节点的 trace step 必须存在且可水合                                     | `get_step` 失败即 bail（prover.rs:639-643、720-722）             | trace 与 chunk 结构必须同步生成；手工裁剪 trace 会导致证明失败                                  |
 
 ---
 
 ## 附录 A 代码索引
 
-| 机制 | 位置 |
-| --- | --- |
-| `LayerRunner` trait（`model_inputs` / `run_layer`） | mod.rs:118-145 |
-| `RunInput` 定义 | mod.rs:125-131 |
-| `BaseRunner`（懒加载、输出打包、proving handle、split 映射） | mod.rs:147-246 |
-| `StoreRunnerMsg` 通道消息类型 | mod.rs:454-479 |
-| `StoreRunner` 构造 + 后台线程 | mod.rs:481-540 |
-| `StoreRunner::send` / `send_element` | mod.rs:542-562 |
-| `StoreRunner` 发送规则（outputs / chunks / recombination / proving） | mod.rs:600-673 |
-| `StoreRunner::Drop`（排空 + join） | mod.rs:640-656 |
-| `TraceRunner` 构造 / run_layer / build_trace_outputs | mod.rs:796-849 / 855-889 |
-| `HandleLifetimeRunner` 构造（输出预加引用） | mod.rs:902-958 |
-| `HandleLifetimeRunner::model_inputs`（计数刷新点） | mod.rs:1002-1044 |
-| `HandleLifetimeRunner::run_layer`（查表供输入 + dry 回收） | mod.rs:1046-1096 |
-| `run_with_runner`（拓扑驱动循环） | mod.rs:1552-1585 |
-| `run_with_split_nodes_info`（栈组装） | mod.rs:1587-1625 |
-| `run_float`（纯推理双层栈对照） | mod.rs:1628-1643 |
-| token 循环 | llm.rs:495-547 |
-| 结果线程（EOS / token 收集） | llm.rs:469-494 |
-| heavy run 与一致性断言 | llm.rs:549-625 |
-| `Trace` / `Step` 结构定义 | trace.rs:29 / 408 |
-| `Trace::new_steps_for_splitted_nodes` / `new_step` | trace.rs:150 / 294 |
-| handle 懒加载 `load()` / dry | handle.rs:375-410 / 451 |
-| concatenation cache（层内增量 KV） | transformer/mod.rs:19-117 |
-| `GenStore::fetch` / `store`（后台线程最终调用） | genstore.rs:211-243 |
-| `Evaluate` trait / `LayerOut` / `ProvingData` / `ProvingHandle` / `TrackedDataId` | provable/mod.rs:308 / 207 / 44-60 / 66-71 / 204 |
-| Activation 的 track 登记 / tracked id 生成 | activation.rs:434-466 / 70-78 |
-| Logits evaluate（ArgmaxData 产出） | logits.rs:382-394 |
-| Softmax evaluate（SoftmaxData）/ prove / lookup witness | softmax/evaluate.rs、prove.rs:11、lookup.rs:124 |
-| LayerNorm 量化评估（mean/std_dev） | layernorm/evaluate.rs:91 |
-| TrackerRunner（tracked_data 唯一消费者） | mod.rs:669-713（drain：710） |
-| `track_intermediate_data` / global_data_trackers | llm_tracker.rs:159-170 / 26-27 |
-| `NodeId` / `NodeOutput` / `NodeInput` / `output_at` | graph.rs:213-235 |
-| `incoming_feeds` / `outgoing_feeds` | graph.rs:518 / 538 |
-| `outgoing_ports`（排序去重） | graph.rs:882 |
-| `to_storage_key`（NodeOutput / NodeId） | mod.rs:1107-1112 |
-| `ChunkingStrategy` trait / Default / LLM 策略 | chunking.rs:969-986 / 1000 / 1710 |
-| `chunk_trace`（全量 trace 抽子 trace） | chunking.rs:553 |
-| boundary 承诺一致性校验 / 边界 claims | chunking.rs:696-712 / 717-746 |
-| `chunked_prove_local`（证明入口） | prover.rs:1043 |
-| 证明执行图（SplitNode / ChunkProver / Final） | prover.rs:939-1020、prover_graph.rs:158-210 |
-| `prove_chunk`（九阶段主流程） | prover.rs:588-918 |
-| `instantiate_witness_ctx_for_chunk`（witness 批量承诺打点） | prover.rs:1171-1210 |
-| claim 反拓扑主循环 / 播种与登记 | prover.rs:717-853（登记：840-846，播种：848-853） |
-| `generate_lookup_witness_for_chunk` | lookup/context.rs:224 |
-| `prove_lookup_op`（查表协议骨架） | lookup/operation/generic_prove.rs:66 |
-| einsum sumcheck | einsum/prove.rs:41 起 |
-| `to_verifier_io` / `element_volume` | trace.rs:311 / 343 |
-| LLM verifier（EOS / 移位校验） | llm.rs:830-890 |
+| 机制                                                                                        | 位置                                              |
+| ------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `LayerRunner` trait（`model_inputs` / `run_layer`）                                   | mod.rs:118-145                                    |
+| `RunInput` 定义                                                                           | mod.rs:125-131                                    |
+| `BaseRunner`（懒加载、输出打包、proving handle、split 映射）                              | mod.rs:147-246                                    |
+| `StoreRunnerMsg` 通道消息类型                                                             | mod.rs:454-479                                    |
+| `StoreRunner` 构造 + 后台线程                                                             | mod.rs:481-540                                    |
+| `StoreRunner::send` / `send_element`                                                    | mod.rs:542-562                                    |
+| `StoreRunner` 发送规则（outputs / chunks / recombination / proving）                      | mod.rs:600-673                                    |
+| `StoreRunner::Drop`（排空 + join）                                                        | mod.rs:640-656                                    |
+| `TraceRunner` 构造 / run_layer / build_trace_outputs                                      | mod.rs:796-849 / 855-889                          |
+| `HandleLifetimeRunner` 构造（输出预加引用）                                               | mod.rs:902-958                                    |
+| `HandleLifetimeRunner::model_inputs`（计数刷新点）                                        | mod.rs:1002-1044                                  |
+| `HandleLifetimeRunner::run_layer`（查表供输入 + dry 回收）                                | mod.rs:1046-1096                                  |
+| `run_with_runner`（拓扑驱动循环）                                                         | mod.rs:1552-1585                                  |
+| `run_with_split_nodes_info`（栈组装）                                                     | mod.rs:1587-1625                                  |
+| `run_float`（纯推理双层栈对照）                                                           | mod.rs:1628-1643                                  |
+| token 循环                                                                                  | llm.rs:495-547                                    |
+| 结果线程（EOS / token 收集）                                                                | llm.rs:469-494                                    |
+| heavy run 与一致性断言                                                                      | llm.rs:549-625                                    |
+| `Trace` / `Step` 结构定义                                                               | trace.rs:29 / 408                                 |
+| `Trace::new_steps_for_splitted_nodes` / `new_step`                                      | trace.rs:150 / 294                                |
+| handle 懒加载 `load()` / dry                                                              | handle.rs:375-410 / 451                           |
+| `wrapped_tensor()`（自旋懒加载 + 读守卫）                                                 | handle.rs:420-443                                 |
+| `from_wrapped_tensor_with_unpadded_shape`（输出打包四字段）                               | handle.rs:598-611                                 |
+| concatenation cache（层内增量 KV）                                                          | transformer/mod.rs:19-117                         |
+| `GenStore::fetch` / `store`（后台线程最终调用）                                         | genstore.rs:211-243                               |
+| `Evaluate` trait / `LayerOut` / `ProvingData` / `ProvingHandle` / `TrackedDataId` | provable/mod.rs:308 / 207 / 44-60 / 66-71 / 204   |
+| Activation 的 track 登记 / tracked id 生成                                                  | activation.rs:434-466 / 70-78                     |
+| Logits evaluate（ArgmaxData 产出）                                                          | logits.rs:382-394                                 |
+| Softmax evaluate（SoftmaxData）/ prove / lookup witness                                     | softmax/evaluate.rs、prove.rs:11、lookup.rs:124   |
+| LayerNorm 量化评估（mean/std_dev）                                                          | layernorm/evaluate.rs:91                          |
+| TrackerRunner（tracked_data 唯一消费者）                                                    | mod.rs:669-713（drain：710）                      |
+| `track_intermediate_data` / global_data_trackers                                          | llm_tracker.rs:159-170 / 26-27                    |
+| `NodeId` / `NodeOutput` / `NodeInput` / `output_at`                                 | graph.rs:213-235                                  |
+| `NodePort` 结构与手写 Display（`Output: N3->:0`）                                       | graph.rs:113-150                                  |
+| `PortId` / `PortLink` / `Edge`（含 `ports` 列表）                                   | graph.rs:279 / 286 / 335-345                      |
+| `Edge::feeds()`（单边展开为 Feed）                                                        | graph.rs:347-358                                  |
+| `Graph.edges`（按 EdgeId 插入序迭代）/ `neighbors`                                      | graph.rs:424-437 / 834-846                        |
+| `incoming_feeds` / `outgoing_feeds`                                                     | graph.rs:518 / 538                                |
+| `outgoing_ports`（排序去重）                                                              | graph.rs:882                                      |
+| `order_by_in_port`（按输入口规整向量）                                                    | graph.rs:171-183                                  |
+| `to_storage_key`（NodeOutput / NodeId）                                                   | mod.rs:1107-1112                                  |
+| `ChunkingStrategy` trait / Default / LLM 策略                                             | chunking.rs:969-986 / 1000 / 1710                 |
+| `chunk_trace`（全量 trace 抽子 trace）                                                    | chunking.rs:553                                   |
+| boundary 承诺一致性校验 / 边界 claims                                                       | chunking.rs:696-712 / 717-746                     |
+| `chunked_prove_local`（证明入口）                                                         | prover.rs:1043                                    |
+| 证明执行图（SplitNode / ChunkProver / Final）                                               | prover.rs:939-1020、prover_graph.rs:158-210       |
+| `prove_chunk`（九阶段主流程）                                                             | prover.rs:588-918                                 |
+| `instantiate_witness_ctx_for_chunk`（witness 批量承诺打点）                               | prover.rs:1171-1210                               |
+| claim 反拓扑主循环 / 播种与登记                                                             | prover.rs:717-853（登记：840-846，播种：848-853） |
+| `generate_lookup_witness_for_chunk`                                                       | lookup/context.rs:224                             |
+| `prove_lookup_op`（查表协议骨架）                                                         | lookup/operation/generic_prove.rs:66              |
+| einsum sumcheck                                                                             | einsum/prove.rs:41 起                             |
+| `to_verifier_io` / `element_volume`                                                     | trace.rs:311 / 343                                |
+| LLM verifier（EOS / 移位校验）                                                              | llm.rs:830-890                                    |

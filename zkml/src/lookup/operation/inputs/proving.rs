@@ -47,6 +47,16 @@ impl LookupInputConfig {
         // Arrange the challenges in the expected order
         batching_challenges.insert(0, sum_challenge);
         batching_challenges.extend(other_challenges);
+        #[cfg(feature = "p1-debug")]
+        eprintln!(
+            "[p1-linking] PROVE claim={:?} sum_ch={:?} other_ch={:?} mles={} lens={:?} logup_point0={:?}",
+            last_claim.evaluation().into_bigint(),
+            sum_challenge.into_bigint(),
+            batching_challenges.iter().skip(1).map(|c| c.into_bigint()).collect::<Vec<_>>(),
+            mles.len(),
+            mles.iter().map(|m| m.len()).collect::<Vec<_>>(),
+            logup_point.first().map(|f| f.into_bigint()),
+        );
 
         // The MLEs are presumed to be provided in the order of the Sumcheck expression so all we need to do is construct the eq polys required.
         let eq_polys = variant.build_eq_polys(

@@ -258,6 +258,12 @@ impl LookupInputConfig {
 
         batching_challenges.insert(0, sum_challenge);
         batching_challenges.extend(other_challenges);
+        eprintln!(
+            "[p1-linking] VERIFY claim={:?} sum_ch={:?} other_ch={:?}",
+            last_claim.evaluation().into_bigint(),
+            sum_challenge.into_bigint(),
+            batching_challenges.iter().skip(1).map(|c| c.into_bigint()).collect::<Vec<_>>(),
+        );
 
         // Construct the data needed for the sumcheck verification
         let initial_claim = self.variant.prepare_sumcheck_verification(

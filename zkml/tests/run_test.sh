@@ -90,7 +90,7 @@ WEIGHT="$CACHE/$REPO/model.safetensors"
 INDEX="$CACHE/$REPO/model.safetensors.index.json"
 if [ -f "$INDEX" ]; then
   # 分片模型：至少一个分片 >1MB 即认为权重在位
-  SHARD_OK=$(find "$CACHE/$REPO" -name "model-*-of-*.safetensors" -size +1M 2>/dev/null | head -1)
+  SHARD_OK=$(find -L "$CACHE/$REPO" -name "model-*-of-*.safetensors" -size +1M 2>/dev/null | head -1)
   if [ -z "$SHARD_OK" ]; then
     echo "FATAL: $REPO 分片权重缺失（仅 index.json）。"
     echo "修复: cd $CACHE && HF_ENDPOINT=https://hf-mirror.com ./download_missing_weights.sh"

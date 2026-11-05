@@ -23,6 +23,7 @@ path = "src/bin/extract_logits.rs"
 
 [features]
 default = ["cpu"]
+p1-debug = []
 # Capture layers' quatization outputs for regression tests
 capture-layers-quant = []
 cpu = ["burn/ndarray", "dep:burn-ndarray"]

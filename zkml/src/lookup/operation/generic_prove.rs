@@ -79,6 +79,10 @@ where
     PCS: CommitmentScheme<Field = F>,
 {
     // First we get the layer commitment and extract it into parts
+    eprintln!(
+        "[p1-debug] PROVE lookup_op node {node_id} claim_eval={} table={}",
+        last_claim.eval.into_bigint(), table.name()
+    );
     let layer_commitment = prover.lookup_witness(node_id)?;
 
     let (layer_polys, commitments): (Vec<_>, Vec<_>) = layer_commitment
