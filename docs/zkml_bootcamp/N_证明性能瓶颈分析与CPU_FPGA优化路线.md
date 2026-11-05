@@ -242,6 +242,49 @@ finish ≈ 最后一段证明 + 合并 + IO。三个来源逐个消解：
 
 ---
 
+## 6 增量优化清单（§3 之外的第二层，按层分类）
+
+> 均为 2026-11-06 代码核查确认的现状，标注依据与工程量量级（S=小时级 / M=天级 / L=周级）。
+
+### 6.1 协议/算法层（减少证明工作量）
+
+| # | 优化点 | 依据 | 预期 | 量级 |
+| --- | --- | --- | --- | --- |
+| A1 | **跨节点 LogUp 批处理**：271 个 requant 实例逐节点独立跑 `new_batch_multiple_sizes_prove`（`generic_prove.rs:137`），同 chunk 的实例可按随机线性组合合并为单次 GKR | 节点普查 ×271；每实例独立轮数+transcript 开销 | 查表族 82% 中的固定开销部分，-10~20% | M |
+| A2 | **einsum+requant 融合**：einsum 输出 claim 直连 requant 输入查表，省一遍全张量 pass（本 fork 无 fusion 模块；旧 gpt2 文档的"融合"另有所指） | requant 紧跟每个 matmul（普查 271 对） | 查表族再一次 -15~25%，内存少一遍 512MB 峰值 | L |
+| A3 | **零物化 MLE 管线（内存主攻）**：MLE 布局=张量展平序，i64→Fr 转换可与 MSM/求值/折叠**按流融合**，不物化 2³¹ Fr=547GB 的 logits MLE | logits 段是 s≥8k 的内存与尾延迟双瓶颈（§1.3/§3.4） | 16k/32k 可测性的**必要条件**；省 550GB 峰值 | M-L |
+| A4 | **权重 Fr 化按 chunk 惰性化**：context 生成一次性把全部权重 Fr 化（13b context 生成 RSS 950GB+ 的主源），改为逐 chunk BF16→Fr→释放 | 13b s=128 实测 950GB；s=512 OOM(1046GB) | 13b 档内存 -50% 以上 | M |
+| S1 | **transcript 连续采样同值（安全复核 + 解锁真 RLC）**：`challenge_bytes` 每次从 XOF 位置 0 读（blake3 `finalize_xof` 语义，`blake3.rs:21-23`），连续 `challenge_scalar()` 返回同值——而 opening 的 RLC 系数逐 poly 连续采样（`prover.rs:119`）→ **系数全部相同**，批处理退化为 c·Σ。修复（hash 计数器派生 k 个系数）需 K 文档复核绑定论证 | 代码实锤；verify 侧同怪癖故双方一致（不影响正确性，影响绑定余量与"真随机 RLC"的防御价值） | 安全余量复核 + 批处理防碰撞 | S-M |
+
+### 6.2 实现层（同工作量跑更快）
+
+| # | 优化点 | 依据 | 预期 | 量级 |
+| --- | --- | --- | --- | --- |
+| I1 | **AVX-512/AMX 蒙哥马利域乘内核**：ark-ff `asm` 已随 dp-crypto `parallel` 启用（基础 mul）；Expander 系有手写内核 2-4× 先例，sumcheck/LogUp 全部直接受益 | `dp-crypto/Cargo.toml:55` parallel→asm | 全证明 2-4×（FPGA 前的过渡收益） | M |
+| I2 | **mimalloc/jemalloc**：无自定义全局分配器；MLE/eq 表大对象高频分配 | `lib.rs` 无 `global_allocator` | 10-30%，一行改动可 A/B | S |
+| I3 | **NUMA 亲和**：多路机器 100GB 级数组 first-touch 本地化，证明线程+rayon 绑节点 | 1TB 机器通常 2 路 | 内存带宽敏感段 10-30% | S-M |
+| I4 | **rayon 池隔离**：前向(burn)与证明(dp-crypto)共享全局池，前向冲高时证明线程饿死（window=2 背压下放大） | 运行观察：8192 证明推进速度随 hunt 并发波动 3-15× | 重叠期吞吐稳定化 | S |
+| I5 | **fieldize/pad 并行化**：`to_field().pad_next_power_of_two()` 为单线程 map（`prover.rs:676/731` 等），每段全量执行两遍 | §3.1 C3 的前置 | 数秒/段 → 亚秒 | S |
+
+### 6.3 GPU 过渡路线（FPGA 就绪前的可选项）
+
+zkml 已内置 `cuda` feature（`burn/cuda` + `dp-crypto/cuda`，上游分支 `feat/hkzg_gpu`）——
+**单张消费级 GPU（如 4090）即可先吃掉两块**：① 前向 i64/量化 matmul（burn cuda 后端），
+② MSM 与域算术（dp-crypto cuda）。作为 FPGA P0 引擎落地前的过渡，10 分钟圈的
+`前向 i8 5×` 假设可先由 GPU 实测验证。
+
+### 6.4 优先级总表（合并 §3）
+
+| 梯队 | 项目 | 为什么 |
+| --- | --- | --- |
+| 立即（S） | I2 分配器、I5 fieldize 并行、C2 段预算、I3 NUMA | 一行/小时级改动，先吃免费收益 |
+| 短期（M） | C1 表证明增量化、A1 LogUp 批处理、I1 域乘内核、I4 池隔离、C4 logits 切分 | 查表族 82% 的主攻；CPU 侧预计合计 2-3× |
+| 中期（M-L） | FPGA OP-07/13 引擎（P0-A）、A3 零物化 MLE、A4 惰性 Fr 化 | 达标 10 分钟的证明端主引擎 + 16k 内存解 |
+| 并行可选 | G1 GPU 过渡、S1 安全复核 | GPU 验证假设、复核绑定论证 |
+| 远期（L） | A2 einsum+requant 融合、FPGA 多通道、前向 matmul 下 FPGA | 冲 7b@2k+ / 13b@1k+ |
+
+---
+
 ## 附：数据可复现性
 
 ```bash
