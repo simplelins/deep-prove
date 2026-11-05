@@ -322,6 +322,7 @@ where
                     .expect("seed chain created just above");
                 let join = std::thread::Builder::new()
                     .stack_size(PROVE_THREAD_STACK_SIZE)
+                    .name("streaming-prover".into())
                     .spawn_scoped(scope, move || {
                         pipeline_prover_thread::<F, T, PCS>(
                             ctx,

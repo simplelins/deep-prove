@@ -55,23 +55,27 @@ FPGA 加速的对象是 `Prover::prove_chunk`（`zkml/src/iop/prover.rs:588`）�
 | OP-04 | EQ 表生成 `evals` | 步骤3/4/7 | 每 claim 一张 2^n 表 | P0 |
 | OP-05 | MLE 求值 / EQ 加权点积 | 步骤3 | 每 claim 一次 | P0 |
 | OP-06 | 表折叠 `fix_low`（相邻对） | 步骤4/7 每轮；KZG Phase1 | 每轮读全表写半表 | P0 |
-| OP-07 | sumcheck 轮引擎（轮多项式 + 两阶段并行） | 步骤4/7 | **主算之一**（占比随模型/规模变化，以 `measure.rs` 实测为准） | P0 |
+| OP-07 | sumcheck 轮引擎（轮多项式 + 两阶段并行，**重点 linking 形态**） | 步骤4/7 | **主算（查表族 linking 占证明算力主体，N 文档实测 82%）** | **P0-A** |
 | OP-08 | RLC 随机线性组合 | 步骤7 | 读全部已承诺表一遍 | P1 |
 | OP-09 | einsum 预处理（Outer 轴固定 / 切表 / pad） | 步骤4 | 每 einsum 节点一次，数据重排为主 | P1 |
-| OP-10 | 批量 MSM（Pippenger，共享基点） | 步骤1/7(KZG Phase2) | 每 2^20 元素块一次 | **P0（主算）** |
+| OP-10 | 批量 MSM（Pippenger，共享基点） | 步骤1/7(KZG Phase2) | 每 2^20 元素块一次（分块后单 MSM 仅 2^20-2^22，CPU 实测每段仅 ~6%） | P1（尾延迟收益，非吞吐） |
 | OP-11 | HyperKZG 打开（三 Phase 全链） | 步骤7 | 每 chunk 一次 | P1 |
 | OP-12 | 查表 witness 生成（位切片 + 值计数 + multiplicity） | 步骤1/6 | 每查表层节点一次 | P2（可后置到 CPU） |
-| OP-13 | LogUp GKR 轮引擎（分数电路） | 步骤4/6 | 每查表层 `log₂表长` 轮 | P2（可后置） |
+| OP-13 | LogUp GKR 轮引擎（分数电路） | 步骤4/6 | 每查表层 `log₂表长` 轮（实例多，与 OP-07 同引擎可合并实现） | **P0-A** |
 | OP-14 | 卷积 FFT 矩阵委托（zkCNN 式） | 仅卷积路径 | LLM 流水线用不到 | P3（按需） |
 
 **明确不做进 FPGA 的部分**（保持主机）：chunk 切分与图调度、claim 寄存器簿记（`HashMap<NodeInput, Claim>` 的维护）、trace 生命周期与内存 pin 管理、ChunkProof 序列化、验证侧全部内容（配对运算等）。理由：它们是控制流/低频逻辑，且协议正确性依赖与 Rust 代码逐字节一致的 transcript 重放，先用主机跑通、再逐个下沉。
 
-### 1.3 建议的实施顺序
+### 1.3 建议的实施顺序（v1.1，按 N 文档实测修正）
 
-1. **P0 一期**：OP-01/02/03/04/05/06/07 → 能跑通"单节点 einsum sumcheck"并和 CPU 逐位对齐；
-2. **P0 二期**：OP-10 → 能完成 witness 批量承诺（数据量最大、收益最直接的一段）；
-3. **P1**：OP-08/09/11 → 打通整 chunk 的端到端 prove；
-4. **P2/P3**：OP-12/13/14（查表层与卷积可暂留 CPU，通过总线把 witness 表送进 FPGA 的 MSM/sumcheck 引擎）。
+> **修正依据**：`N_证明性能瓶颈分析与CPU_FPGA优化路线.md` §1.3 的算子级实测
+> （`--measure-layerwise`，gemma-270m s=512）表明**查表族（logUp+linking+witness）占证明
+> 算力 ~82%，einsum 主 sumcheck 仅 8%，MSM 仅 ~6%**——本节原版"先 MSM"的顺序据此反转。
+
+1. **P0 一期**：OP-01/02/03/04/05/06 + **OP-07（sumcheck，重点 linking 形态）+ OP-13（LogUp GKR）** → 能跑通"单节点 requant/rms-norm 查表证明"并和 CPU 逐位对齐（覆盖实测 82% 算力的主体）；
+2. **P0 二期**：OP-10/11 → witness 批量承诺与 KZG 打开（吞吐占比小，但决定 finish 尾延迟）；
+3. **P1**：OP-08/09 → 打通整 chunk 的端到端 prove；
+4. **P2/P3**：OP-12/14（查表 witness 可暂留 CPU，通过总线把 MLE 结果送进 FPGA 的 sumcheck/LogUp 引擎）。
 
 ---
 
