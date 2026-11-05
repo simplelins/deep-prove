@@ -445,7 +445,6 @@ fn main() -> anyhow::Result<()> {
             distributed::run_distributed(trace.unwrap(), &driver, &prover_ctx, chunks.unwrap())?
         } else if args.streaming {
             mem_snap("5a.prove_before");
-            let peak_rss = peak_rss_bytes();
             // the sentence to prove: the fixed prompt in prompt mode, or the
             // model-generated sentence from the reference pass (the LLM shift
             // check requires the greedy predictions to match the next tokens;

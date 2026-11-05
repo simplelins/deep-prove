@@ -864,7 +864,7 @@ impl Driver<Element> {
         let strategy = LLMChunkingStrategy::new_vertical_only(input_length, &ctx.model_ctx);
         let num_chunks = strategy.num_chunks_for_budget_with_max(
             budget_bytes,
-            crate::iop::chunking::DEFAULT_MAX_SEGMENTS,
+            max_segments,
             &ctx.model_ctx,
         )?;
         info!(

@@ -240,7 +240,7 @@ where
         && chunk.boundary_edges(BoundaryEdgeType::Incoming).is_empty()
         && chunk.boundary_edges(BoundaryEdgeType::Outgoing).is_empty()
     {
-        warn!("Lookup witness generation: no tables found, returning empty context TEST?");
+        warn!("Lookup witness generation: no tables found, returning empty context");
         return Ok(LookupWitness::default());
     }
 

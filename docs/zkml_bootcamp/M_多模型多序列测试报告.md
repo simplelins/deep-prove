@@ -6,9 +6,8 @@
 | --- | --- |
 | 文档编号 | M |
 | 所属系列 | zkml_bootcamp |
-| 版本 | 1.0 |
+| 版本 | 1.1（11-05：第二轮验证汇总、P1 排除清单更新、F5-F7） |
 | 发布日期 | 2026-10-31 |
-| 文档状态 | 已发布 |
 
 ---
 
@@ -37,22 +36,25 @@
 | F2 | **gemma-3 老版 config 兼容**：gemma-3-1b-it 的 config.json 缺 `layer_types`，parser 硬性要求 → 加载失败 | 回退到架构默认模式（每 6 层第 6 层 full attention，与新版 config 的实际值一致） | d21e3a2f |
 | F3 | **LFS 指针文件混淆报错**：未拉取的权重（135 字节文本）导致 `header too large` 等费解错误 | `from_hugging_face_cached` 检测 LFS 指针 magic，报可操作错误 | d21e3a2f |
 | F4 | 观测缺失：bench 日志被 EnvFilter 过滤（无 RUST_LOG 时 INFO 全丢）、verify 失败只有裸 panic 无段号 | 压测脚本加 RUST_LOG；`verify_streaming` 逐段 catch_unwind，失败报告 chunk idx/id/节点数；run 循环加 forward/dispatch/pin 释放分项计时 | d21e3a2f |
+| F5 | llama-2-13b 分片权重（index.json + model-*-of-*.safetensors）被预检误判缺失 | 预检接受分片布局（`find -L` 检查任一分片 >1MB） | 979cf294 |
+| F6 | P1 诊断 eprintln 无 feature 门控，污染生产输出（每次 lookup 验证都打印） | 全部收进 `p1-debug` cargo feature；生产构建零输出，猎捕构建 `--features p1-debug`（独立 target-p1 目录） | 本次 |
+| F7 | **`--stream-max-segments` 旗标被忽略**：`prove_streaming_with_max_segments` 参数收下后硬编码 `DEFAULT_MAX_SEGMENTS(48)` | 改用入参；历史记录均用默认 48，数据一致性不受影响 | 本次 |
 
 ## 3 未决问题：偶发 verify 失败（P1）
 
-**现象**：gemma-270m s=1024（16 段）的 `verify_streaming` **偶发**失败——压测 3 轮中 r2 失败、r1/r3 通过；MSM 补丁前后各出现过。失败点**固定模式**：sumcheck verifier 第 0 轮"prover message not consistent with the claim"（进入 sumcheck 前 transcript 已分叉）。压测捕获的现场：`chunk idx 9 (Chunk(6), 44 节点)`；r3 同段通过。
+**现象**：gemma-270m s=1024（16 段）的 `verify_streaming` **偶发**失败——压测 3 轮中 r2 失败、r1/r3 通过；MSM 补丁前后各出现过。失败点**固定模式**：sumcheck verifier 第 0 轮"prover message not consistent with the claim"（进入 sumcheck 前 transcript 已分叉）。压测捕获的现场：`chunk idx 9 (Chunk(6), 44 节点)`；r3 同段通过。chunking overhaul 后**失败率大幅下降**（~50% → ~9%：11-04 hunt r2 又失败一次 `chunk idx 8 (Chunk(7), 58 节点)` RMSNorm linking sumcheck，此后 r3-r6 + 复测累计 10/11 通过；失败样本 `model_cache/hunt_p1_r2.log` 保留）。
 
-**已排除**：SWA 生效（s=768 通过）、边界承诺顺序（BTreeMap）、表 multiplicity 顺序（BTreeMap table_column 序）、opening 顺序（两侧均 BTreeMap）、模型 IO 锚定、pipeline 投递顺序（FIFO=吸收序=Vec 序）。
+**已排除**：SWA 生效（s=768 通过）、边界承诺顺序（BTreeMap）、表 multiplicity 顺序（BTreeMap table_column 序）、opening 顺序（两侧均 BTreeMap）、模型 IO 锚定、pipeline 投递顺序（FIFO=吸收序=Vec 序）；以及 11-05 静态审计新增——witness 承诺吸收（`forward_inners` 序）、multiplicities 承诺（`element_count` 外层 `BTreeMap<Table>` + `Table` 内容序 Ord）、claims batching sumcheck（两侧 model_commitments / witness_claims 均 BTreeMap）、ChallengeStorage 挑战采样序（`LookupContext.tables` BTreeMap）、失败时刻无并发重负载（竞争-负载假设不成立）。
 
-**当前怀疑**：Chunk(6) 段内某个**吸收进 transcript 的元素存在进程级随机顺序**（RandomState），或 dp-crypto sumcheck prover 多 worker 与 transcript 交互的顺序非确定。诊断工具已就位（逐段 panic 定位 + INFO 日志 + 压测脚本 `model_cache/stress_s1024.sh`，失败率约 1/3–2/3，单轮 ~50 分钟）。
+**当前怀疑**：诊断钩子已就位——PROVE/VERIFY 两侧的 `[p1-linking]` dump（claim + challenges + mles 长度）会在失败现场直接判别：两侧 dump 序列首次分叉处 = transcript 分叉点（容器顺序问题）；两侧完全一致 = witness 数据在 prove 时刻不一致（重算/竞态）。猎捕脚本 `model_cache/hunt_p1_v2.sh`（`--features p1-debug` 专用二进制，s=1024 循环直到失败）。
 
 **影响评估**：**可靠性缺陷**（非安全缺陷——失败是"诚实的证明被拒绝"，不是"伪造证明被接受"）。经典单段路径（`Driver::prove`）未观察到失败。
 
-**下一步**：① 以 Chunk(6) 为最小复现做段级 diff（dump prover/verifier 两侧 transcript 的吸收序列）；② 审计 `prove_chunk` 内所有进 transcript 的迭代容器；③ 检查 dp-crypto sumcheck prover 多 worker 路径。
+**下一步**：① 猎捕 v2 抓一次带双侧 dump 的失败现场；② 按首次分叉点定位；③ 若为数据不一致，审计 `prove_lookup_op` 中 prove 时刻重算路径（`lookup_op.apply` 重算 logup 输出、`create_extra_sumcheck_mles` 读 step 输入张量）与 trace 时刻数据的一致性。
 
 ## 4 长序列的硬约束（CPU 后端）
 
-**burn-ndarray 的 i64 matmul 是朴素单线程实现**（multi-threads feature 仅对浮点 gemm 生效）：gemma-270m s=1024 的**单次前向 57 分钟**（run 循环打点 forward=3421s，流式证明只增加 ~5 分钟）。外推：s=4096 前向 ~15h、s=8192 ~60h、s=16384 ~240h——**4k+ 的 CPU 端到端测试在当前实现下不可行**，与流式证明无关。可行路径：① CUDA 后端（`--features cuda`，前向 GPU 化）；② burn/candle 的多线程 i64 gemm；③ G 文档的 GPU 实测路线。
+**【已被 P2 修复取代】burn-ndarray 的 i64 matmul 是朴素单线程实现**（multi-threads feature 仅对浮点 gemm 生效）：gemma-270m s=1024 的**单次前向 57 分钟**。当时外推 4k+ 不可行——**该结论随 P2（rayon i64 matmul，§5.1）失效**：s=4096 已端到端通过（§5.2.1，前向 885s），s=8192 修复后可行。当前真正的长序列硬约束是 **RAM 容量**（§5.2：logits MLE 与 T_pad 随序列线性/平方增长）与 13b 级模型的上下文生成内存（s=128 即 ~950GB，见 §7）。
 
 ## 5 复盘战役结果（同二进制全量重测，RUN_ID 20261103_090437）
 
@@ -157,6 +159,27 @@ llama-7b T_pad≈63GB（Fr）÷ 512MB 预算 → **125 段**，实测每段 ~6.5
 
 ---
 
+## 7 第二轮验证汇总（chunking overhaul 后，11-04 → 11-05）
+
+P3 修复（阈值 2²² + `MAX_CHUNKS=65536` 容量兜底 + logits `max_poly_len` 下限）落地后的验证战果：
+
+| 测试 | 结果 | 关键数据 |
+| --- | --- | --- |
+| gemma-270m s=4096 | ✅ PASS | 48 段，forward=885s、dispatch=5313s、finish=1462s，端到端 2.13h，磁盘读 0，峰值 734GB，proof 27.7MB（=§5.2.1） |
+| gemma-270m s=8192 | 🔄 运行中 | 11-05 23:09 启动；证明阶段 2²³ poly 正常分块（MSM 无越界），结果待记录 |
+| gemma-1b s=512 / s=1024 | ✅ PASS（重验） | 旧二进制上的 2/2 P1 失败（§5.3）在新二进制未复现 |
+| llama-2-13b s=128 | ✅ PASS | 18 段，forward=978.6s、dispatch=4434.4s、finish=932s（端到端 ~1.8h），verify 18 段全过，stores 3.03GB、磁盘读 0；权重 = modelscope 原始 safetensors 符号链接（不经转换） |
+| llama-2-13b s=512 | ⚠️ 两次静默中断 | 11-05 05:29 与 23:02 两次运行均无 panic 无完成日志即停止（特征疑似 OOM-SIGKILL）——13b 上下文生成内存 ~950GB 量级，**重跑必须独占机器内存**（勿与其它测试并发） |
+
+**给手动执行者（13b s=512）**：
+
+```bash
+# 确认无其它 bench-llm 进程后（free -g 可用内存 > 700GB）：
+cd zkml/model_cache && nohup ./run_test.sh llama13b_s512 > llama13b_s512_run.log 2>&1 &
+```
+
+---
+
 ## 复现命令
 
 ```bash
@@ -168,6 +191,6 @@ target/release/bench-llm --model gpt2 --hf openai-community/gpt2 --sequence 512 
 target/release/bench-llm --model gemma3 --hf google/gemma-3-270m-it --sequence 1024 \
   --streaming --stream-budget-mb 512 --stream-window 2 \
   --prompt-file model_cache/long_prompt.txt --bench model_cache/bench.prompt.csv
-# verify 偶发失败压测
-model_cache/stress_s1024.sh   # 3 轮 s=1024
+# verify 偶发失败压测（P1 猎捕，带双侧 [p1-linking] dump 的专用二进制）
+cd zkml/model_cache && ./hunt_p1_v2.sh   # s=1024 循环直到失败（最多 8 轮）；或 ./reproduce_p1_s1024.sh
 ```

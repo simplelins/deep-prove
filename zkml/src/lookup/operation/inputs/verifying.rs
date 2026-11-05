@@ -258,6 +258,7 @@ impl LookupInputConfig {
 
         batching_challenges.insert(0, sum_challenge);
         batching_challenges.extend(other_challenges);
+        #[cfg(feature = "p1-debug")]
         eprintln!(
             "[p1-linking] VERIFY claim={:?} sum_ch={:?} other_ch={:?}",
             last_claim.evaluation().into_bigint(),

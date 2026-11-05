@@ -79,6 +79,7 @@ where
     PCS: CommitmentScheme<Field = F>,
 {
     // First we get the layer commitment and extract it into parts
+    #[cfg(feature = "p1-debug")]
     eprintln!(
         "[p1-debug] PROVE lookup_op node {node_id} claim_eval={} table={}",
         last_claim.eval.into_bigint(), table.name()

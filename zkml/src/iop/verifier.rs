@@ -356,6 +356,7 @@ impl<'a, F: PrimeField, T: Transcript, PCS: CommitmentScheme<Field = F>> Verifie
                 tracing::debug!("[verify-node] chunk {chunk_id} node {node_id}");
                 match node {
                     Node::Inner(inner_node) => {
+                        #[cfg(feature = "p1-debug")]
                         if let Some(first_claim) = claims.values().next() {
                             eprintln!(
                                 "[p1-debug] VERIFY chunk {chunk_id} node {node_id} first_claim={}",

@@ -45,3 +45,6 @@ zkml/model_cache/openai-community/gpt2/tokenizer.json
 *.py
 __pycache__/
 *.pyc
+.zcode/
+usb2iic.tar
+target-p1/
