@@ -166,7 +166,7 @@ P3 修复（阈值 2²² + `MAX_CHUNKS=65536` 容量兜底 + logits `max_poly_le
 | 测试 | 结果 | 关键数据 |
 | --- | --- | --- |
 | gemma-270m s=4096 | ✅ PASS | 48 段，forward=885s、dispatch=5313s、finish=1462s，端到端 2.13h，磁盘读 0，峰值 734GB，proof 27.7MB（=§5.2.1） |
-| gemma-270m s=8192 | 🔄 运行中 | 11-05 23:09 启动；证明阶段 2²³ poly 正常分块（MSM 无越界），结果待记录 |
+| gemma-270m s=8192 | ⚠️ 尾段 OOM（47 段数据有效） | run loop 完整：forward=2917s、dispatch=15706s（47 段 ≈5.8min/段）、磁盘读 0；05:24 logits 尾段在 finish/drain 的 fieldize/MLE 物化阶段 RSS 1034GB 被 OOM——N 文档 A3/C4 的精确实证；P3 修复在 8k 规模的 47 个正常段全部成立（无 MSM 越界） |
 | gemma-1b s=512 / s=1024 | ✅ PASS（重验） | 旧二进制上的 2/2 P1 失败（§5.3）在新二进制未复现 |
 | llama-2-13b s=128 | ✅ PASS | 18 段，forward=978.6s、dispatch=4434.4s、finish=932s（端到端 ~1.8h），verify 18 段全过，stores 3.03GB、磁盘读 0；权重 = modelscope 原始 safetensors 符号链接（不经转换） |
 | llama-2-13b s=512 | ⚠️ 两次静默中断 | 11-05 05:29 与 23:02 两次运行均无 panic 无完成日志即停止（特征疑似 OOM-SIGKILL）——13b 上下文生成内存 ~950GB 量级，**重跑必须独占机器内存**（勿与其它测试并发） |

@@ -106,6 +106,7 @@ zkml/model_cache/results/<RUN_ID>/
 | OOM killed | 内存不足：降低并发（本套件本身串行）、换更小序列；llama s≥1024 需独占机器 |
 | `Truncating to N while first dimension is M` | 模型架构上限（如 gpt2 位置嵌入 1024）——预期行为 |
 | verify 报 `0th round's prover message not consistent` | **P1 偶发失败**（可靠性缺陷非安全缺陷）：把 summary 交回分析，勿删日志 |
+| `has overflowed its stack` | 证明路径存在深层递归，在 ~2MB 栈的 rayon worker / 测试线程上溢出。bench-llm 已内置全局池 64MB 栈；跑 `cargo test` 需 `RUST_MIN_STACK=67108864 cargo test ...`（长序列测试尾段 OOM 见 M 文档 §7：logits MLE 物化 8k 即触顶） |
 
 ## 7. 复盘对照基线（P2 修复前 → 后）
 

@@ -229,8 +229,10 @@ finish ≈ 最后一段证明 + 合并 + IO。三个来源逐个消解：
 
 ## 5 前置条件与风险
 
-1. **RAM**：13b@512 实测 1046GB OOM。达标圈内的组合峰值预计 ≤700GB（270m@16k 待
-   s=8192 实测校准）。context 生成 params 可 `--save-params` 复用（llama-7b pk 165GB）。
+1. **RAM**：13b@512 实测 1046GB OOM；**gemma-270m s=8192 亦在 logits 尾段 fieldize/MLE
+   物化处 RSS 1034GB OOM**（47 个正常段全部证明完成——见 M 文档 §7）——A3 零物化 MLE 与
+   C4 水平切分从"16k 必要条件"升级为"**8k 即必要**"。context 生成 params 可 `--save-params`
+   复用（llama-7b pk 165GB）。
 2. **P1 可靠性**：偶发 verify 失败（M 文档 §3，~9%/run）在量产前必须根因修复；
    猎捕 v2（双侧 dump）进行中。
 3. **尾延迟与超尺寸段**：水平切分（phase 2）未落地前，logits 段是所有组合的 finish 下限。
