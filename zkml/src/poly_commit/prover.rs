@@ -7,6 +7,7 @@ use std::{
 use anyhow::{anyhow, ensure};
 use ark_ff::PrimeField;
 use dp_crypto::{
+    ArcMultilinearExtension,
     IntoMLE,
     arkyper::{CommitmentScheme, transcript::Transcript},
     poly::{
@@ -103,12 +104,18 @@ impl<F: PrimeField, PCS: CommitmentScheme> CommitmentProver<F, PCS> {
     where
         PCS: CommitmentScheme<Field = F>,
     {
+        // Lazily-committed polys (large model weights) are re-derived here, on
+        // demand, for the polynomials this chunk actually placed claims on —
+        // then dropped when the returned OpeningProof is built.
+        let claimed_ids = self.model_claims.keys().cloned().collect_vec();
+        let lazy_overrides = ctx.materialize_lazy(claimed_ids.iter())?;
+
         let ClaimsBatchingProof {
             sumcheck_proof,
             sumcheck_evals,
             sumcheck_point,
             committed_polys,
-        } = self.claims_batching_sumcheck(witness_commitments, ctx, transcript)?;
+        } = self.claims_batching_sumcheck(witness_commitments, ctx, &lazy_overrides, transcript)?;
 
         // Sample the challenges to batch the committed_polys into a single polynomial;
         // Before sampling the challenges, we add all claims to the transcript
@@ -141,6 +148,7 @@ impl<F: PrimeField, PCS: CommitmentScheme> CommitmentProver<F, PCS> {
         &mut self,
         witness_commitments: &'a HashMap<NodeId, Vec<CommittedPolynomial<'c, F, PCS>>>,
         commit_ctx: &'b CommitmentProverCtx<'c, F, PCS>,
+        lazy_overrides: &'c HashMap<CommitmentId, ArcMultilinearExtension<'c, F>>,
         transcript: &mut T,
     ) -> anyhow::Result<ClaimsBatchingProof<'c, F>>
     where
@@ -173,7 +181,11 @@ impl<F: PrimeField, PCS: CommitmentScheme> CommitmentProver<F, PCS> {
                             poly.batching_coefficients_for_chunks(&point)
                         })
                         .collect_vec();
-                    committed_polys.extend(poly.chunked_polys());
+                    match lazy_overrides.get(id) {
+                        // lazily-committed poly: use the just-re-derived Fr data
+                        Some(fr) => committed_polys.extend(fr.as_view_chunks(poly.num_chunks())),
+                        None => committed_polys.extend(poly.chunked_polys()),
+                    }
                     max_num_vars = max_num_vars.max(poly.num_vars_for_chunk());
                     Some(poly.to_chunked_info(batching_coefficients))
                 } else {

@@ -58,7 +58,7 @@ impl<'a, F: PrimeField, PCS: CommitmentScheme> From<&CommittedPolynomial<'a, F, 
     fn from(value: &CommittedPolynomial<'a, F, PCS>) -> Self {
         Self {
             chunk_commitments: value.chunk_commitments.clone(),
-            num_vars: value.polynomial.num_vars(),
+            num_vars: value.poly_num_vars,
         }
     }
 }
@@ -69,7 +69,7 @@ impl<'a, F: PrimeField, PCS: CommitmentScheme> From<CommittedPolynomial<'a, F, P
     fn from(value: CommittedPolynomial<'a, F, PCS>) -> Self {
         Self {
             chunk_commitments: value.chunk_commitments,
-            num_vars: value.polynomial.num_vars(),
+            num_vars: value.poly_num_vars,
         }
     }
 }

@@ -433,7 +433,15 @@ impl Pooling {
 
         let (layer_polys, commitments): (Vec<_>, Vec<_>) = layer_commitment
             .iter()
-            .map(|comm| (comm.polynomial.clone(), VerifierCommitment::from(comm)))
+            .map(|comm| {
+                (
+                    comm.polynomial
+                        .as_ref()
+                        .expect("witness polys are always resident")
+                        .clone(),
+                    VerifierCommitment::from(comm),
+                )
+            })
             .unzip();
 
         let logup_inputs = self.create_logup_inputs::<F>(

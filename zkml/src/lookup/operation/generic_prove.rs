@@ -90,7 +90,11 @@ where
         .iter()
         .map(|committed_poly| {
             (
-                committed_poly.polynomial.clone(),
+                committed_poly
+                    .polynomial
+                    .as_ref()
+                    .expect("lookup witness polys are always resident")
+                    .clone(),
                 VerifierCommitment::from(committed_poly),
             )
         })

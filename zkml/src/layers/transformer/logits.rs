@@ -552,13 +552,17 @@ where
             .iter()
             .map(|committed_poly| {
                 (
-                    committed_poly.polynomial.clone(),
+                    committed_poly
+                        .polynomial
+                        .as_ref()
+                        .expect("lookup witness polys are always resident")
+                        .clone(),
                     VerifierCommitment::from(committed_poly),
                 )
             })
             .unzip();
 
-        let max_mle = &layer_polys[0].as_ref();
+        let max_mle = &layer_polys[0];
         let logup_input = self.build_lookup_input(
             &layer_polys,
             &prover.challenge_storage,

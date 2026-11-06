@@ -11,14 +11,10 @@ use crate::{
     poly_commit::context::{CommitmentProverCtx, CommitmentVerifierCtx, GlobalCommitmentContext},
     rng_from_env_or_random,
     tensor::CommitmentId,
-    to_field,
 };
 use anyhow::ensure;
 use ark_ff::PrimeField;
-use dp_crypto::{
-    arkyper::{CommitmentScheme, transcript::Transcript},
-    poly::dense::DensePolynomial,
-};
+use dp_crypto::arkyper::{CommitmentScheme, transcript::Transcript};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -110,7 +106,7 @@ impl Model<Element> {
         };
 
         // TODO: refactor that management of polys
-        let mut model_polys = HashMap::<CommitmentId, DensePolynomial<F>>::new();
+        let mut model_polys = HashMap::<CommitmentId, Vec<Element>>::new();
         let mut tables = BTreeMap::<Table, Vec<NodeId>>::new();
         // The shape register is filled along the traversal of the graph.
         let mut shapes: HashMap<NodeOutput, Shape> = HashMap::new();
@@ -317,7 +313,7 @@ pub struct ContextAux {
 
 fn compute_layer_ctx<F: PrimeField>(
     ctx_aux: &mut ContextAux,
-    model_polys: &mut HashMap<CommitmentId, DensePolynomial<F>>,
+    model_polys: &mut HashMap<CommitmentId, Vec<Element>>,
     id: NodeId,
     layer: &Layer<Element>,
 ) -> anyhow::Result<LayerCtx<F>> {
@@ -327,18 +323,20 @@ fn compute_layer_ctx<F: PrimeField>(
         layer.describe()
     );
     let (info, mut new_aux) = layer.step_info(ctx_aux.clone())?;
-    // Retrieve any model polynomials that need to be committed
+    // Retrieve any model polynomials that need to be committed. The integer
+    // (i64) sources are kept as-is: the Fr conversion happens inside the
+    // commitment context (streaming, per-group) so large model weights never
+    // materialize as Fr all at once (lazy commitment).
     if let Some(aux_model_polys) = &mut new_aux.model_polys {
         for (poly_id, evals) in aux_model_polys.drain() {
-            let mle = DensePolynomial::new(to_field::<_, F, _>(evals));
-            if let Some(expected_mle) = model_polys.get(&poly_id) {
+            if let Some(expected) = model_polys.get(&poly_id) {
                 // check that the same poly was stored for `poly_id`
                 debug_assert!(
-                    expected_mle == &mle,
-                    "Found different MLE for polynomial {poly_id}"
+                    expected == &evals,
+                    "Found different evals for polynomial {poly_id}"
                 );
             } else {
-                model_polys.insert(poly_id, mle);
+                model_polys.insert(poly_id, evals);
             }
         }
     }

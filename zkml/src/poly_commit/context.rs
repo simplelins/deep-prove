@@ -19,6 +19,7 @@ use tracing::debug;
 use utils::Metrics;
 
 use crate::{
+    Element,
     graph::NodeId,
     lookup::table::Table,
     poly_commit::{
@@ -31,7 +32,14 @@ use crate::{
 #[serde(bound = "")]
 pub struct CommittedPolynomial<'a, F: PrimeField, PCS: CommitmentScheme> {
     pub(super) chunk_commitments: Vec<PCS::Commitment>,
-    pub(crate) polynomial: ArcMultilinearExtension<'a, F>,
+    /// Number of variables of the committed polynomial. Kept even when the Fr
+    /// data is dropped (lazy mode) so metadata consumers keep working.
+    pub(crate) poly_num_vars: usize,
+    /// Fr data of the committed polynomial. `None` = lazily derivable: the
+    /// polynomial was committed and its Fr data dropped to save memory (large
+    /// model weights); it can be re-derived bit-exactly from the registered
+    /// integer source when a claim needs it (chunk-end RLC/opening).
+    pub(crate) polynomial: Option<ArcMultilinearExtension<'a, F>>,
 }
 
 impl<'a, F: PrimeField, PCS: CommitmentScheme> ChunkedCommitment
@@ -42,17 +50,23 @@ impl<'a, F: PrimeField, PCS: CommitmentScheme> ChunkedCommitment
     }
 
     fn num_vars(&self) -> usize {
-        self.polynomial.num_vars()
+        self.poly_num_vars
     }
 }
 
 impl<'a, F: PrimeField, PCS: CommitmentScheme> CommittedPolynomial<'a, F, PCS> {
     pub fn polynomial(&self) -> &DensePolynomial<'a, F> {
-        self.polynomial.as_ref()
+        self.polynomial
+            .as_ref()
+            .expect("polynomial Fr data was dropped (lazy); materialize it before use")
+            .as_ref()
     }
 
     pub(crate) fn chunked_polys(&self) -> Vec<DensePolynomial<'_, F>> {
-        self.polynomial.as_view_chunks(self.num_chunks())
+        self.polynomial
+            .as_ref()
+            .expect("polynomial Fr data was dropped (lazy); materialize it before use")
+            .as_view_chunks(self.num_chunks())
     }
 
     pub(crate) fn batch_commit(
@@ -72,16 +86,19 @@ impl<'a, F: PrimeField, PCS: CommitmentScheme> CommittedPolynomial<'a, F, PCS> {
             .flat_map(|(poly, &num_chunks)| poly.as_view_chunks(num_chunks))
             .collect_vec();
         let mut commitments_iter = PCS::batch_commit(prover_params, &chunked_mles)?.into_iter();
+        let num_vars_per_poly = polys.iter().map(|poly| poly.num_vars()).collect_vec();
         Ok(polys
             .into_iter()
             .zip(num_chunks_per_poly)
-            .map(|(poly, num_chunks)| {
+            .zip(num_vars_per_poly)
+            .map(|((poly, num_chunks), poly_num_vars)| {
                 let comms = (0..num_chunks)
                     .map_while(|_| commitments_iter.next().map(|(comm, _)| comm))
                     .collect();
                 CommittedPolynomial {
                     chunk_commitments: comms,
-                    polynomial: poly.into(),
+                    poly_num_vars,
+                    polynomial: Some(poly.into()),
                 }
             })
             .collect())
@@ -158,24 +175,53 @@ where
     table_node_id: NodeId,
     /// This is the largest number of variables of any of the polynomials in `model_commitment`
     max_model_num_vars: usize,
+    /// Integer (i64) sources for lazily-committed polynomials: large model
+    /// weights are Fr-ized, committed, and their Fr data dropped to keep the
+    /// context residency bounded; the Fr data is re-derived bit-exactly from
+    /// these sources when a claim needs it (chunk-end RLC/opening).
+    /// Serialized as the plain i64 data (1/4 of the old Fr dump) so that
+    /// `--save-params`/`--load-params` keep working with lazy commitments.
+    #[serde(with = "arc_vec_map_serde", default)]
+    lazy_sources: HashMap<CommitmentId, std::sync::Arc<Vec<Element>>>,
 }
+
+/// Polynomials with at least this many variables are committed lazily (their Fr
+/// data is dropped after the MSM and re-derived on demand). Below the threshold
+/// the Fr data is small enough to stay resident (existing behavior).
+const LAZY_COMMIT_MIN_VARS: usize = 20;
+
+/// Cap on the total number of field elements Fr-ized at once during the
+/// streaming commit — bounds the context-generation memory peak to a few GB
+/// regardless of model size.
+const COMMIT_GROUP_ELEMS: usize = 1 << 24;
 
 impl<'a, F, PCS> GlobalCommitmentContext<'a, F, PCS>
 where
     PCS: CommitmentScheme<Field = F>,
     F: PrimeField,
 {
-    /// Make a new [`GlobalCommitmentContext`]
+    /// Make a new [`GlobalCommitmentContext`].
+    ///
+    /// `polys` carries the integer (i64) evaluation sources of the model's
+    /// static polynomials; each is Fr-ized, committed via MSM and — when large
+    /// enough — dropped in favor of the registered source (lazy commitment).
     pub fn new<R: Rng>(
         witness_poly_num_vars: usize,
-        polys: HashMap<CommitmentId, DensePolynomial<'a, F>>,
+        polys: HashMap<CommitmentId, Vec<Element>>,
         lookup_ctx: &[&Table],
         max_node_id: NodeId,
         rng: &mut R,
     ) -> Result<GlobalCommitmentContext<'a, F, PCS>> {
+        let num_vars_of = |evals: &Vec<Element>| -> usize {
+            assert!(
+                evals.len().is_power_of_two(),
+                "committed poly length must be a power of two"
+            );
+            evals.len().trailing_zeros() as usize
+        };
         // Find the maximum size so we can generate params
-        let max_num_vars = polys.iter().fold(witness_poly_num_vars, |acc, (_, poly)| {
-            acc.max(poly.num_vars())
+        let max_num_vars = polys.iter().fold(witness_poly_num_vars, |acc, (_, evals)| {
+            acc.max(num_vars_of(evals))
         });
 
         let pcs_max_num_vars =
@@ -192,56 +238,74 @@ where
         // First we take all the model polys and sort them by the number of variables they have.
         // Then we do the same for any table commitments but here we set all of them to have `table_node_id`.
         let table_commitments_check = lookup_ctx.iter().any(|table| table.commit_output_column());
-        let model_commitments = if !polys.is_empty() || table_commitments_check {
-            let (model_poly_ids, model_polys): (Vec<_>, Vec<_>) = polys
-                .into_iter()
-                .chain(lookup_ctx.iter().filter_map(|table| {
-                    table
-                        .committed_columns::<F>()
-                        .map(|mle| (table_poly_id(table.name()), mle))
-                }))
-                .unzip();
-            // let (model_comms_map, model_polys) = polys
-            // .into_iter()
-            // .map(|(poly_id, poly)| (poly.num_vars(), (poly_id, poly)))
-            // .chain(lookup_ctx.iter().filter_map(|table_type| {
-            // table_type
-            // .committed_columns()
-            // .map(|mle| (mle.num_vars(), (table_poly_id(table_type.name()), mle)))
-            // }))
-            // .fold(
-            // (BTreeMap::new(), Vec::new()),
-            // |(mut map_acc, mut model_polys), (num_vars, (poly_id, mle))| {
-            // map_acc
-            // .entry(num_vars)
-            // .or_insert(Vec::new())
-            // .push(poly_id.clone());
-            // model_polys.push(PolynomialWithId {
-            // id: poly_id,
-            // polynomial: mle,
-            // });
-            // (map_acc, model_polys)
-            // },
-            // );
-            // debug!("{} model_comms_map built", m.to_span());
-
-            // Commit to model_polys
+        let mut lazy_sources: HashMap<CommitmentId, std::sync::Arc<Vec<Element>>> = HashMap::new();
+        let mut model_commitments: BTreeMap<CommitmentId, CommittedPolynomial<'a, F, PCS>> =
+            BTreeMap::new();
+        if !polys.is_empty() || table_commitments_check {
+            // Streaming commit: Fr-ize and MSM one bounded group at a time so the
+            // context-generation peak stays flat regardless of model size; large
+            // polys drop their Fr data afterwards (lazy re-derivation from the
+            // registered i64 source keeps the commitment bit-exact).
             let m = Metrics::new();
-            let model_commitments = CommittedPolynomial::batch_commit(&prover_params, model_polys)
-                .context("Model commitment for poly {poly_id}")?
-                .into_iter()
-                .zip(model_poly_ids)
-                .map(|(commitment, poly_id)| (poly_id, commitment))
-                .collect();
+            let mut group: Vec<(CommitmentId, DensePolynomial<'a, F>)> = Vec::new();
+            let mut group_elems = 0usize;
+            let flush = |group: Vec<(CommitmentId, DensePolynomial<'a, F>)>,
+                             model_commitments: &mut BTreeMap<
+                CommitmentId,
+                CommittedPolynomial<'a, F, PCS>,
+            >,
+                             lazy_sources: &HashMap<
+                CommitmentId,
+                std::sync::Arc<Vec<Element>>,
+            >|
+             -> Result<()> {
+                if group.is_empty() {
+                    return Ok(());
+                }
+                let (ids, polys): (Vec<_>, Vec<_>) = group.into_iter().unzip();
+                let committed = CommittedPolynomial::batch_commit(&prover_params, polys)
+                    .context("Model commitment for poly {poly_id}")?;
+                for (poly_id, commitment) in ids.into_iter().zip(committed) {
+                    let lazy = commitment.poly_num_vars >= LAZY_COMMIT_MIN_VARS
+                        && lazy_sources.contains_key(&poly_id);
+                    let mut commitment = commitment;
+                    if lazy {
+                        commitment.polynomial = None;
+                    }
+                    model_commitments.insert(poly_id, commitment);
+                }
+                Ok(())
+            };
+
+            for (poly_id, evals) in polys {
+                let evals = std::sync::Arc::new(evals);
+                let num_vars = num_vars_of(&evals);
+                let fr = DensePolynomial::new(crate::to_field::<Element, F, _>(evals.as_slice()));
+                lazy_sources.insert(poly_id.clone(), evals);
+                group.push((poly_id, fr));
+                group_elems += 1usize << num_vars;
+                if group_elems >= COMMIT_GROUP_ELEMS {
+                    flush(
+                        std::mem::take(&mut group),
+                        &mut model_commitments,
+                        &lazy_sources,
+                    )?;
+                    group_elems = 0;
+                }
+            }
+            // Table committed columns (Fr, no i64 source) — always resident.
+            for table in lookup_ctx {
+                if let Some(mle) = table.committed_columns::<F>() {
+                    group.push((table_poly_id(table.name()), mle));
+                }
+            }
+            flush(group, &mut model_commitments, &lazy_sources)?;
             debug!("{} model commitments built", m.to_span());
-            model_commitments
-        } else {
-            BTreeMap::new()
-        };
+        }
 
         let max_model_num_vars = model_commitments
             .values()
-            .map(|poly| poly.polynomial.num_vars())
+            .map(|poly| poly.poly_num_vars)
             .max()
             .unwrap_or(0usize);
         Ok(GlobalCommitmentContext {
@@ -250,6 +314,7 @@ where
             model_commitments,
             table_node_id,
             max_model_num_vars,
+            lazy_sources,
         })
     }
 
@@ -267,7 +332,7 @@ where
             model_commitments,
             table_node_id,
             max_model_num_vars,
-            ..
+            lazy_sources,
         } = self;
 
         let verifier_ctx = CommitmentVerifierCtx {
@@ -287,6 +352,7 @@ where
             model_commitments,
             table_node_id,
             max_model_num_vars,
+            lazy_sources,
         };
 
         Ok((prover_ctx, verifier_ctx))
@@ -312,6 +378,43 @@ where
     table_node_id: NodeId,
     /// This is the largest number of variables of any of the polynomials in `model_commitment`
     pub(super) max_model_num_vars: usize,
+    /// Integer sources for lazily-committed polynomials (see
+    /// [`GlobalCommitmentContext`]); serialized as plain i64 data.
+    #[serde(with = "arc_vec_map_serde", default)]
+    pub(super) lazy_sources: HashMap<CommitmentId, std::sync::Arc<Vec<Element>>>,
+}
+
+impl<'a, F, PCS> CommitmentProverCtx<'a, F, PCS>
+where
+    F: PrimeField,
+    PCS: CommitmentScheme<Field = F>,
+{
+    /// Re-derive the Fr data of the lazily-committed polynomials among `ids`
+    /// from their registered integer sources. The re-derivation runs the exact
+    /// conversion used at commitment time, so the result is bit-identical to
+    /// what the MSM consumed. Drop the returned map after use (the whole point
+    /// is to not keep large weight Fr data resident).
+    pub(crate) fn materialize_lazy<'id>(
+        &self,
+        ids: impl Iterator<Item = &'id CommitmentId>,
+    ) -> Result<HashMap<CommitmentId, ArcMultilinearExtension<'a, F>>> {
+        let mut out = HashMap::new();
+        for id in ids {
+            let Some(committed) = self.model_commitments.get(id) else {
+                continue;
+            };
+            if committed.polynomial.is_some() {
+                continue;
+            }
+            let source = self.lazy_sources.get(id).ok_or_else(|| {
+                anyhow::anyhow!("lazy poly {id} has no registered i64 source")
+            })?;
+            let mle = DensePolynomial::new(crate::to_field::<Element, F, _>(source.as_slice()));
+            debug_assert_eq!(mle.num_vars(), committed.poly_num_vars);
+            out.insert(id.clone(), mle.into());
+        }
+        Ok(out)
+    }
 }
 
 impl<'a, F: PrimeField, PCS: CommitmentScheme<Field = F>> CommitmentProverCtx<'a, F, PCS> {
@@ -320,11 +423,13 @@ impl<'a, F: PrimeField, PCS: CommitmentScheme<Field = F>> CommitmentProverCtx<'a
         &self,
         poly: DensePolynomial<'a, F>,
     ) -> anyhow::Result<CommittedPolynomial<'a, F, PCS>> {
-        let num_chunks = num_chunks_for_polynomial(poly.num_vars());
+        let poly_num_vars = poly.num_vars();
+        let num_chunks = num_chunks_for_polynomial(poly_num_vars);
         if num_chunks == 1 {
             PCS::commit(&self.prover_params, &poly).map(|(commitment, _)| CommittedPolynomial {
                 chunk_commitments: vec![commitment],
-                polynomial: poly.into(),
+                poly_num_vars,
+                polynomial: Some(poly.into()),
             })
         } else {
             let chunked_poly = poly.as_view_chunks(num_chunks);
@@ -334,7 +439,8 @@ impl<'a, F: PrimeField, PCS: CommitmentScheme<Field = F>> CommitmentProverCtx<'a
                         .into_iter()
                         .map(|(comm, _)| comm)
                         .collect(),
-                    polynomial: poly.into(),
+                    poly_num_vars,
+                    polynomial: Some(poly.into()),
                 }
             })
         }
@@ -395,5 +501,31 @@ where
 
     pub fn table_node_id(&self) -> NodeId {
         self.table_node_id
+    }
+}
+
+/// serde bridge for `HashMap<CommitmentId, Arc<Vec<i64>>>` (serde's `rc`
+/// feature is not enabled; the map is serialized as owned i64 vectors —
+/// the natural on-disk format for lazy sources and 1/4 of the old Fr dump).
+mod arc_vec_map_serde {
+    use super::Element;
+    use crate::tensor::CommitmentId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::{collections::HashMap, sync::Arc};
+
+    pub fn serialize<S: Serializer>(
+        map: &HashMap<CommitmentId, Arc<Vec<Element>>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let owned: HashMap<&CommitmentId, &Vec<Element>> =
+            map.iter().map(|(k, v)| (k, &**v)).collect();
+        owned.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<CommitmentId, Arc<Vec<Element>>>, D::Error> {
+        let owned = HashMap::<CommitmentId, Vec<Element>>::deserialize(deserializer)?;
+        Ok(owned.into_iter().map(|(k, v)| (k, Arc::new(v))).collect())
     }
 }

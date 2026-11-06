@@ -67,7 +67,12 @@ impl LookupContext {
         // First we retrieve the multiplicity polynomials
         let multiplicity_polys = multiplicities_commitments
             .iter()
-            .map(|committed_poly| &committed_poly.polynomial);
+            .map(|committed_poly| {
+                committed_poly
+                    .polynomial
+                    .as_ref()
+                    .expect("multiplicity polys are always resident")
+            });
         self.iter()
             .zip(multiplicity_polys)
             .map(|(table, m_poly)| {
@@ -431,7 +436,12 @@ where
     assert_eq!(
         multiplicities_commitments
             .iter()
-            .map(|p| p.polynomial.len())
+            .map(|p| {
+                p.polynomial
+                    .as_ref()
+                    .expect("multiplicity polys are always resident")
+                    .len()
+            })
             .collect::<Vec<usize>>(),
         multiplicities_poly_len
     );

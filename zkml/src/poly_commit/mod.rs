@@ -209,6 +209,7 @@ mod tests {
     use crate::{
         Claim,
         lookup::table::Table,
+        to_field, Element,
         poly_commit::{
             context::{CHUNK_SIZE_THRESHOLD, GlobalCommitmentContext},
             prover::CommitmentProver,
@@ -247,10 +248,9 @@ mod tests {
         let model_polys: HashMap<_, _> = (0..5)
             .map(|i| {
                 let num_vars = rng.gen_range(10..16);
-                (
-                    CommitmentId::from(format!("model_poly_{i}")),
-                    DensePolynomial::<F>::random(num_vars, &mut rng),
-                )
+                let len = 1usize << num_vars;
+                let evals: Vec<Element> = (0..len).map(|_| rng.gen_range(-1000..1000)).collect();
+                (CommitmentId::from(format!("model_poly_{i}")), evals)
             })
             .collect();
 
@@ -281,7 +281,8 @@ mod tests {
         let model_claims = model_polys
             .iter()
             .enumerate()
-            .map(|(i, (poly_id, poly))| {
+            .map(|(i, (poly_id, evals))| {
+                let poly = DensePolynomial::<F>::new(to_field::<Element, F, _>(evals.as_slice()));
                 let point = gen_point(poly.num_vars(), &mut rng);
                 let eval = poly.evaluate(&point)?;
                 let mut claims = vec![(0.into(), Claim::new(point, eval))];
@@ -291,6 +292,7 @@ mod tests {
                     let eval = poly.evaluate(&point)?;
                     claims.push((1.into(), Claim::new(point, eval)));
                 }
+                let _ = poly_id;
                 commit_prover.add_common_claims([(poly_id.clone(), claims.clone())].into());
                 anyhow::Ok((
                     poly_id.clone(),
@@ -353,8 +355,12 @@ mod tests {
                 let claims = committed_polys
                     .iter()
                     .map(|poly| {
-                        let point = gen_point(poly.polynomial.num_vars(), &mut rng);
-                        let eval = poly.polynomial.evaluate(&point)?;
+                        let fr = poly
+                            .polynomial
+                            .as_ref()
+                            .expect("witness polys are always resident");
+                        let point = gen_point(fr.num_vars(), &mut rng);
+                        let eval = fr.evaluate(&point)?;
                         let claim = Claim::new(point, eval);
                         Ok(vec![claim])
                     })
