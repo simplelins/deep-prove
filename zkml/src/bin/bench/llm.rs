@@ -234,12 +234,6 @@ fn bench_csv_path(bench: &str, model: &str, max_context: usize) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    // rayon worker 默认栈 ~2MB：证明路径存在深层递归（表达式求值等），witness 生成
-    // 与 sumcheck 在 worker 上会栈溢出（实测 prove_gpt2 测试线程 2MB 溢出、64MB 通过）。
-    // 全局池统一加大到 64MB（与流式证明线程 PROVE_THREAD_STACK_SIZE 对齐）。
-    let _ = rayon::ThreadPoolBuilder::new()
-        .stack_size(64 * 1024 * 1024)
-        .build_global();
     let subscriber = tracing_subscriber::fmt::Subscriber::builder()
         .with_env_filter(EnvFilter::from_default_env())
         .finish();
@@ -260,8 +254,12 @@ fn main() -> anyhow::Result<()> {
         num_cpus::get()
     };
     info!("Using {} threads", num_threads);
+    // worker 栈从默认 ~2MB 提到 64MB：证明路径存在深层递归（表达式求值等），
+    // witness 生成与 sumcheck 在 2MB worker 上会栈溢出（实测 prove_gpt2 测试线程
+    // 2MB 溢出、64MB 通过），与流式证明线程 PROVE_THREAD_STACK_SIZE 对齐
     rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
+        .stack_size(64 * 1024 * 1024)
         .build_global()
         .unwrap();
 
@@ -339,6 +337,8 @@ fn main() -> anyhow::Result<()> {
         (prover_ctx, verifier_ctx)
     };
     mem_snap("3.generate_contexts");
+    // context 生成（权重 Fr 化）的瞬时峰值可达数百 GB，归还滞留堆内存后再进前向/证明
+    zkml::trim_heap();
 
     if let Some(ref save_params) = args.save_params {
         if args.load_params.is_some() {

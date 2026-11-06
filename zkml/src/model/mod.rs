@@ -1812,10 +1812,17 @@ impl Model<Element> {
                 // thread notify their release asynchronously
                 released.extend(coordinator.take_released());
                 let t2 = std::time::Instant::now();
+                let n_released = released.len();
                 for chunk_id in released {
                     // the chunk's proof is done: its tensors can be dried
                     let keys = coordinator.keys_to_pin(chunk_id).to_vec();
                     runner.release_pins(keys)?;
+                }
+                if n_released > 0 {
+                    // a chunk completed: return freed heap (witness polys,
+                    // converted copies) to the OS instead of letting glibc
+                    // retain it — the next chunk's allocation peak stacks on top
+                    crate::trim_heap();
                 }
                 t_pin_release += t2.elapsed();
             }

@@ -216,6 +216,19 @@ pub fn argmax<T: PartialOrd>(v: &[T]) -> Option<usize> {
     Some(max_index)
 }
 
+// glibc：将空闲堆内存归还 OS。context 生成（权重 Fr 化）峰值数百 GB 后，
+// glibc 默认滞留已释放内存，后续阶段（trace + 证明）叠加会提前触顶 OOM。
+#[cfg(target_os = "linux")]
+pub fn trim_heap() {
+    unsafe extern "C" {
+        fn malloc_trim(pad: usize) -> i32;
+    }
+    unsafe { malloc_trim(0) };
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn trim_heap() {}
+
 /// Converts an iterator of elements to the extension field.
 pub(crate) fn to_field<T, E, I>(iter: I) -> Vec<E>
 where
