@@ -42,6 +42,7 @@
 | S08 收口：几十条主张 → 一次打开 | batched sumcheck 完整手算（二次轮函数）；RLC；折叠链复现 S06 终值；三点恒等式手验 | batched sumcheck、RLC、HyperKZG |
 | S09 查表：非线性函数的证明 | 多重度公式；分数双侧折叠（无除法）；交叉核对；linking 概念 | LogUp、LogUp-GKR |
 | S10 组装：完整机器 | S01 游戏结案；GKR 范式；DeepProve 端到端数据流；两条成本规律的推导 | GKR、layer-by-layer |
+| S11 论文精读（逐节伴读） | 左手 PDF 右手讲义：§1 五大挑战 → §3 纲领 → §4 四个"妙手" → §5 读表指南；Protocol ↔ 课程对照表 | 认证算法、virtual claims、proof-of-non-hallucination |
 
 ### 实战篇（L07–L09）
 
@@ -65,7 +66,7 @@
 | W5 | S07 承诺 | S07；Gemini 论文选读 | P5（toy KZG） |
 | W6 | S08 收口 | S08；HyperKZG 源码 | P6（三点打开推导与对拍） |
 | W7 | S09 查表 | S09；LogUp 论文 | P7（toy LogUp） |
-| W8 | S10 组装 + 系统主教材 | S10；`prove_chunk 详解` 全文；DeepProve 论文 §1-4 | P8（数据流图 + GPT-2 端到端） |
+| W8 | S10 组装 + 论文精读 + 系统主教材 | S10、S11；`prove_chunk 详解` 全文；DeepProve 论文全文 | P8（数据流图 + GPT-2 端到端） |
 | W9 | 系统精读 I：prove 侧 | L07；详解逐行 | P9（dump 工具 + 对拍实验） |
 | W10 | 系统精读 II：verify 侧 | verifier 源码 + 详解 §7.3 | P10（性能剖析报告） |
 | W11 | 期末项目 | L08 P11 | 新算子 PIOP 设计与实现（或 mini-zkml） |
