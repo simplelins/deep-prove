@@ -169,7 +169,8 @@ P3 修复（阈值 2²² + `MAX_CHUNKS=65536` 容量兜底 + logits `max_poly_le
 | gemma-270m s=8192 | ⚠️ 尾段 OOM（47 段数据有效） | run loop 完整：forward=2917s、dispatch=15706s（47 段 ≈5.8min/段）、磁盘读 0；05:24 logits 尾段在 finish/drain 的 fieldize/MLE 物化阶段 RSS 1034GB 被 OOM——N 文档 A3/C4 的精确实证；P3 修复在 8k 规模的 47 个正常段全部成立（无 MSM 越界） |
 | gemma-1b s=512 / s=1024 | ✅ PASS（重验） | 旧二进制上的 2/2 P1 失败（§5.3）在新二进制未复现 |
 | llama-2-13b s=128 | ✅ PASS | 18 段，forward=978.6s、dispatch=4434.4s、finish=932s（端到端 ~1.8h），verify 18 段全过，stores 3.03GB、磁盘读 0；权重 = modelscope 原始 safetensors 符号链接（不经转换） |
-| llama-2-13b s=512 | ❌ 三次 OOM（定案） | 11-05 两次 + 11-06 第三次（trim+WINDOW=1 改造后）均 ~1040GB 被内核 OOM；**根因定案：13b 的 context 生成峰值 ~1069GB（s=128 实测，与序列长度无关）**——本机 1TB 物理内存的硬边界，s=128 通过属侥幸。**13b 上本机的解锁钥匙是 A4（权重 Fr 化按 chunk 惰性化），而非 trace 级优化**；改造前 13b 实际上限 = s=128 |
+| llama-2-13b s=512 | ✅ **PASS（A4 后）** | 11-07：**进程峰值 488GB**（A4 惰性权重承诺前三次 OOM @~1040GB，**-53%**）、forward=1205s、dispatch=10458s（48 段 ≈3.6min/段）、finish=290s、verify 48 段全过、端到端 **4h44m**、磁盘读 0（commit 0600ba04） |
+| llama-7b s=1024 | ✅ PASS（首次） | 11-07：forward=1310s、dispatch=9356s（48 段 ≈3.2min/段）、verify 48 段全过、端到端 **4h00m**、磁盘读 0——7B 级 1k 序列首跑通，段体积缩放规律（917MB/段→3.2min）与成本模型吻合 |
 
 **给手动执行者（13b s=512）**：
 
