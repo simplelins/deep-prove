@@ -1,10 +1,17 @@
 # 设计 · A1 跨节点 LogUp 批处理（M1/D1.2）
 
-> 目标：把 `prove_chunk` 内每个查表节点各自独立的一次 LogUp GKR 证明
+> **⚠️ 估订正（11-07，实现前核算）——降级为 P2，暂缓实施**：
+> 细读 GKR 语义后发现 `new_batch_multiple_sizes_prove` 每轮处理**全部实例**的多项式
+> （工作量 O(Σ实例体积)×log₂(max_size)）——多节点批量化**不减少体积比例项**，
+> 只省每实例固定开销（实例挑战/claim 提取/transcript  plumbing）。原估"查表族
+> 10-20%"改为 **~5% 总证明时间**；对 ~400 行跨 5 文件的协议敏感重构，性价比不足。
+> 查表族的真杠杆是 **A2（einsum+requant 融合）**——把 requant 的 linking sumcheck
+> （O(张量) 主体）折叠进 matmul sumcheck，才是 O() 级减少。A1 保留设计备查，
+> 待 A2 落地后若固定开销占比上升再重启。
+
+> 原目标：把 `prove_chunk` 内每个查表节点各自独立的一次 LogUp GKR 证明
 > （`prove_lookup_op` → `new_batch_multiple_sizes_prove`，gemma-270m 48 段 × ~9 节点）
-> 合并为**每 chunk 一次**批量 GKR。实测依据：查表族占证明算力 82%（N 文档 §1.3），
-> 其中逐节点 GKR 的固定开销（transcript 轮次、实例批处理、claim 提取）预计压减
-> 查表族 10-20%。
+> 合并为**每 chunk 一次**批量 GKR。实测依据：查表族占证明算力 82%（N 文档 §1.3）。
 
 ## 1 现状流程（per node，`generic_prove.rs::prove_lookup_op`）
 
