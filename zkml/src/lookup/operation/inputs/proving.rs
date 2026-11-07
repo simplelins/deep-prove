@@ -80,7 +80,11 @@ impl LookupInputConfig {
         let num_threads = optimal_sumcheck_threads(num_vars);
         let expression = self.build_full_sumcheck_expression::<F>();
 
-        #[cfg(test)]
+        // P1 hunting: run the brute-force self-check (sum over the hypercube vs
+        // the claim) on the polynomials AS SEEN BY THIS CALL — a mismatch here
+        // means the witness data is inconsistent with the claim (transcript is
+        // already ruled out by the [p1-linking] dumps matching on both sides).
+        #[cfg(any(test, feature = "p1-debug"))]
         {
             self.debug_linking_sumcheck(
                 mles,
@@ -124,7 +128,7 @@ impl LookupInputConfig {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "p1-debug"))]
 mod test_utils {
 
     use dp_crypto::utils::eval_by_expr_with_instance;

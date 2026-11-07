@@ -46,7 +46,9 @@
 
 **已排除**：SWA 生效（s=768 通过）、边界承诺顺序（BTreeMap）、表 multiplicity 顺序（BTreeMap table_column 序）、opening 顺序（两侧均 BTreeMap）、模型 IO 锚定、pipeline 投递顺序（FIFO=吸收序=Vec 序）；以及 11-05 静态审计新增——witness 承诺吸收（`forward_inners` 序）、multiplicities 承诺（`element_count` 外层 `BTreeMap<Table>` + `Table` 内容序 Ord）、claims batching sumcheck（两侧 model_commitments / witness_claims 均 BTreeMap）、ChallengeStorage 挑战采样序（`LookupContext.tables` BTreeMap）、失败时刻无并发重负载（竞争-负载假设不成立）。
 
-**当前怀疑**：诊断钩子已就位——PROVE/VERIFY 两侧的 `[p1-linking]` dump（claim + challenges + mles 长度）会在失败现场直接判别：两侧 dump 序列首次分叉处 = transcript 分叉点（容器顺序问题）；两侧完全一致 = witness 数据在 prove 时刻不一致（重算/竞态）。猎捕脚本 `model_cache/hunt_p1_v2.sh`（`--features p1-debug` 专用二进制，s=1024 循环直到失败）。
+**✅ 判别完成（11-07 黄金现场 hunt v2_3）**：失败节点 **Chunk(7)/N173（RequantiseTable_10bits）**——与历史 r2 完全同段同节点（失败位置**确定性**，随机的是数据是否被污染）。两侧 dump 对照：**claim / sum_ch / other_ch 逐位完全一致** → **transcript 清白**，round-0 失败 = **证明时刻 witness 数据与 claim 不自洽**（数据污染/竞态分支实锤，transcript 分叉分支排除）。
+
+**在查**：污染源锁定在 prove 时刻的重算链（witness 多项式（rayon 并行 witness gen 产物）vs 主 sumcheck 的输出 trace MLE——两条路径读同一 trace 张量的时刻不同）。新工具：`debug_linking_sumcheck` 暴力自检已挂进 prove 路径（p1-debug feature），失败现场将打印 output/norm/input/sum 四项分项差值，直接指认被污染的项。猎捕继续（hunt_p1_v2.sh）。
 
 **影响评估**：**可靠性缺陷**（非安全缺陷——失败是"诚实的证明被拒绝"，不是"伪造证明被接受"）。经典单段路径（`Driver::prove`）未观察到失败。
 
