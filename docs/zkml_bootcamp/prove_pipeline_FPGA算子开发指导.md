@@ -130,7 +130,7 @@ CPU 侧 golden 实现：`dp_crypto/arkyper/transcript/mod.rs` + `blake3.rs`。�
    - `append_points(&[G1Affine])`：每点 x(32B)‖y(32B)；∞ 点写 16B 零；
    - `append_bytes`：原样；
 3. **采样**：`challenge_scalar()` = `state.finalize_xof().fill(16 字节)` → `F::from_le_bytes_mod_order`（mod.rs:29-34）。`append_and_sample(label)` = 先 update(label) 再采样；
-4. **实现现状（重要，测试向量必须复刻）**：blake3 1.8.3 的 `finalize_xof(&self)` 每次返回**从 XOF 流位置 0 开始**的读取器（blake3 src/lib.rs:1413-1419）。因此**中间没有插入任何吸收的连续 `challenge_scalar()` 返回同一个值**——`read_challenges(n)`（zkml lib.rs:181-183，连续 n 次采样）得到的 n 个挑战**全部相同**。典型后果：`compute_claim` 采样出的求值点是 `(c,c,…,c)` 型对角点、same_poly 的 k 个合并系数相同。这不是硬件要修的问题（验证方逐字节重放，协议自洽），但**硬件测试向量不要假设挑战互异**，一切以 CPU dump 为准；
+4. **采样流语义（v1.1，S1 修复后——测试向量必须复刻）**：**修复前** blake3 1.8.3 的 `finalize_xof(&self)` 每次从 XOF 流位置 0 开始读，中间无吸收的连续 `challenge_scalar()` 返回同一个值（RLC 系数退化为 c·Σ、对角点为 (c,…,c)）。**修复后**（dp-crypto blake3.rs，S1）：transcript 维持 pending XOF 流——吸收后首个采样从位置 0 读（与旧语义一致），**连续采样推进流**（互异），再次吸收则流重置。硬件必须实现同样的三态语义；`read_challenges(n)` 得到 n 个**互异**挑战、RLC 系数互异。一切以 CPU dump 为准；
 5. **标签清单**：全流水线用到的 DST 与采样标签见附录 A。新增代码路径时先在附录 A 登记标签再写硬件。
 
 **延迟要求**：sumcheck 每轮在"发轮多项式 → 得挑战 → 折叠表"之间存在硬依赖（见 OP-07），挑战采样必须低延迟。每轮吸收的数据量 = (max_degree+1)×32B + 标签 ≈ 数百字节，BLAKE3 单块压缩即可出 16B XOF——建议 Blake3 核与主数据通路并行常驻，采样延迟目标 < 1 μs。

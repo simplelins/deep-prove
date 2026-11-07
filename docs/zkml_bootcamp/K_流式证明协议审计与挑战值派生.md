@@ -6,7 +6,7 @@
 | --- | --- |
 | 文档编号 | K |
 | 所属系列 | zkml_bootcamp |
-| 版本 | 1.0 |
+| 版本 | 1.2（S1：transcript 连续采样同值修复，见 §补遗） |
 | 发布日期 | 2026-10-30 |
 | 文档状态 | 已发布 |
 | 适用代码基线 | `zkml/src/iop/prover.rs`、`zkml/src/iop/verifier.rs`、`zkml/src/iop/chunking.rs`、`zkml/src/iop/mod.rs`、`zkml/src/lookup/context.rs`、`zkml/src/model/context.rs`、dp-crypto `sumcheck/prover.rs`（commit 22e8e93） |
@@ -260,3 +260,23 @@ seed₀ = S.challenge_scalar()
 | 划分/线束/边界检查 | model/context.rs:599-717（replaced-nodes TODO：700） |
 | 跨 chunk 承诺一致性 | chunking.rs:622-712、verifier.rs:670-675 |
 | Store 流量计数器（基线测量） | tenstore/src/metrics.rs、genstore.rs（fetch/disk_read/store 计数） |
+
+
+---
+
+## 补遗 v1.2：S1——transcript 连续采样同值修复（11-07）
+
+**发现**：blake3 1.8.3 `finalize_xof(&self)` 每次从 XOF 流位置 0 读取——中间无吸收的连续
+`challenge_scalar()` 返回**同一个值**。后果：① `read_challenges(n)` 的 n 个挑战全同
+（`compute_claim` 的对角点、chunk 输出 claim 公共点）；② opening 的 RLC 系数逐 poly
+连续采样（`prover.rs:119`）→ 全部相同，随机线性组合退化为 c·Σ——批处理绑定余量受损
+（原文审计的"承诺先入 transcript、挑战后派生"顺序不变，此为派生**值**缺陷）。
+
+**修复**（dp-crypto blake3.rs）：transcript 维持 pending XOF 流——吸收后首个采样从
+位置 0 读（**与旧语义一致**），连续采样推进流（互异），再次吸收则流重置。prover 与
+verifier 共用同一实现，重放一致性保持；prove_gpt2 端到端 + gemma-270m s=512 全链
+revalidate 通过。
+
+**影响**：① RLC 成为真随机线性组合（绑定余量恢复）；② 对角点变为真随机点；
+③ **所有历史证明与新二进制互不兼容**（挑战值变化）——留痕结果仍对应各自当时的
+二进制，无需重跑；④ 硬件 golden 向量以修复后语义为准（FPGA 文档 §2.3.4 v1.1）。
