@@ -17,6 +17,38 @@
 //! already proven in `attention_mask/prove.rs` (the offset matrix O = U·S + P
 //! family). See `docs/zkml_bootcamp/设计_D1.1带状注意力分数.md`.
 
+use crate::layers::transformer::attention_mask::AttentionSpan;
+use crate::tensor::TensorTypeParam;
+
+mod evaluate;
+pub use evaluate::*;
+
+/// Banded attention scores layer (D1.1): computes the sliding-window QK
+/// product directly at `[Hq, s, w]` instead of the full `[Hq, s, s]`.
+#[derive(Debug, Clone)]
+pub struct BandedQK<T> {
+    pub span: AttentionSpan,
+    pub heads_per_kv_head: usize,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> BandedQK<T> {
+    pub fn new(span: AttentionSpan, heads_per_kv_head: usize) -> Self {
+        Self {
+            span,
+            heads_per_kv_head,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub fn window(&self) -> usize {
+        match self.span {
+            AttentionSpan::Local(w) => w,
+            AttentionSpan::Full => panic!("BandedQK requires AttentionSpan::Local"),
+        }
+    }
+}
+
 /// Query index selected by window position `off` for query row `i`.
 /// `s` is the sequence length; positions are clamped to `[0, i]` (causal).
 #[inline]
