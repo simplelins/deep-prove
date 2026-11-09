@@ -48,7 +48,7 @@
 
 **✅ 判别完成（11-07 黄金现场 hunt v2_3）**：失败节点 **Chunk(7)/N173（RequantiseTable_10bits）**——与历史 r2 完全同段同节点（失败位置**确定性**，随机的是数据是否被污染）。两侧 dump 对照：**claim / sum_ch / other_ch 逐位完全一致** → **transcript 清白**，round-0 失败 = **证明时刻 witness 数据与 claim 不自洽**（数据污染/竞态分支实锤，transcript 分叉分支排除）。
 
-**在查**：污染源锁定在 prove 时刻的重算链（witness 多项式（rayon 并行 witness gen 产物）vs 主 sumcheck 的输出 trace MLE——两条路径读同一 trace 张量的时刻不同）。新工具：`debug_linking_sumcheck` 暴力自检已挂进 prove 路径（p1-debug feature），失败现场将打印 output/norm/input/sum 四项分项差值，直接指认被污染的项。猎捕继续（hunt_p1_v2.sh）。
+**在查（11-10 更新）**：自检钩子**已首次触发**——requant 节点（RequantiseTable_10bits，shape [1023×640]）的暴力自检：`Total output prover ≠ last claim`（output 部分的 witness 求和与节点输出 claim 不一致）——**witness 数据污染实锤到具体项**。头号嫌疑：**requant 的 shift data 是从输入张量 max 派生的数据相关值**——若 trace 张量在前向之后、witness 重算之前被改写（pipeline 下 chunk N+1/N+2 前向与 chunk N 证明并发的窗口），witness 重算用不同 shift → 与前向输出不一致。**下一钩子（mutation detector）**：前向时记录 requant 输入张量的 max/校验和，witness-gen 时复检——差值即定位改写时刻与责任方。猎捕继续。
 
 **影响评估**：**可靠性缺陷**（非安全缺陷——失败是"诚实的证明被拒绝"，不是"伪造证明被接受"）。经典单段路径（`Driver::prove`）未观察到失败。
 
