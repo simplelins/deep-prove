@@ -23,6 +23,8 @@ use crate::tensor::TensorTypeParam;
 mod evaluate;
 pub use evaluate::*;
 
+mod poly_identity;
+
 /// Banded attention scores layer (D1.1): computes the sliding-window QK
 /// product directly at `[Hq, s, w]` instead of the full `[Hq, s, s]`.
 #[derive(Debug, Clone)]
