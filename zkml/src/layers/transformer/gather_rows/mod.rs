@@ -16,6 +16,39 @@
 //! - B/AV = 标准 einsum prove（fix_axes，零新协议）
 //! - 后续 Stage B（研究轨）：零物化 K′ 的 Toeplitz/商见证构造（§10）
 
+mod evaluate;
+pub use evaluate::*;
+
+use crate::backend::Backend;
+use crate::layers::transformer::attention_mask::AttentionSpan;
+use crate::tensor::{TensorTypeParam, WrappedTensor};
+
+/// GatherRows layer: gathers the rows of K/V according to the sliding-window
+/// map (D1.1 Stage A). See the module docs above.
+#[derive(Debug, Clone)]
+pub struct GatherRows<T> {
+    pub span: AttentionSpan,
+    pub heads_per_kv_head: usize,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> GatherRows<T> {
+    pub fn new(span: AttentionSpan, heads_per_kv_head: usize) -> Self {
+        Self {
+            span,
+            heads_per_kv_head,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub fn window(&self) -> usize {
+        match self.span {
+            AttentionSpan::Local(w) => w,
+            AttentionSpan::Full => panic!("GatherRows requires AttentionSpan::Local"),
+        }
+    }
+}
+
 /// Source row index for the flattened window position `t = i·w + off`.
 #[inline]
 pub(crate) fn gather_source_index(t: usize, w: usize, s: usize) -> usize {
