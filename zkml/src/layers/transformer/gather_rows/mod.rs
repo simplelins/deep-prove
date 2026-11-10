@@ -19,6 +19,8 @@
 mod evaluate;
 pub use evaluate::*;
 
+mod prove;
+
 use crate::backend::Backend;
 use crate::layers::transformer::attention_mask::AttentionSpan;
 use crate::tensor::{TensorTypeParam, WrappedTensor};
