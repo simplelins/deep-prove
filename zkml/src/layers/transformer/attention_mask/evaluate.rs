@@ -22,6 +22,28 @@ where
         let caching_case = unpadded_shape.dims[unpadded_shape.num_dims() - 2] == 1
             && unpadded_shape.dims[unpadded_shape.num_dims() - 1] > 1;
 
+        // D1.1 Stage A：带状分数的角掩码——输入 [h,q,w]，掩 q+off < w-1 的无效位
+        if let Some(bw) = self.banded_window {
+            let q = unpadded_shape.dims[unpadded_shape.num_dims() - 2];
+            let mask_data: Vec<bool> = (0..q * bw)
+                .map(|t| {
+                    let i = t / bw;
+                    let off = t % bw;
+                    i + off < bw - 1
+                })
+                .collect();
+            let band_mask = BTensor::<Backend, 2, Bool>::from_data(
+                burn::tensor::TensorData::new(mask_data, [q, bw]),
+                &Default::default(),
+            );
+            let bshape: burn::tensor::Shape = unpadded_shape.clone().into();
+            let band_mask: BTensor<Backend, 3, Bool> = band_mask
+                .reshape([1, q, bw])
+                .expand::<3, _>(bshape);
+            let unpadded_output = input.mask_fill_3d(band_mask, self.negative_infinity)?;
+            return Ok(unpadded_output);
+        }
+
         let mask = match caching_case {
             true => caching_case_mask(self.span, seq_len),
             false => non_caching_case_mask(self.span, seq_len),

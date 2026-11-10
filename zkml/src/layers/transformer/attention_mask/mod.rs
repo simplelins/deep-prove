@@ -51,6 +51,9 @@ pub const ATTENTION_MASK_LAYER: &str = "MASK";
 /// cached inferences for now.
 #[derive(Clone, Debug, Serialize, Deserialize, Copy)]
 pub struct AttentionMask<N> {
+    /// D1.1 Stage A：带状分数的角掩码模式——输入 [h,q,w]（w=窗口），
+    /// 掩码 q+off < w-1 的无效位（gather clamp 产生的重复键 0 位）
+    pub banded_window: Option<usize>,
     span: AttentionSpan,
     /// The value for negative infinity
     negative_infinity: N,
@@ -71,6 +74,7 @@ impl<N: TensorTypeParam> Default for AttentionMask<N> {
         AttentionMask {
             negative_infinity: <N as Number>::MIN,
             span: Default::default(),
+            banded_window: None,
         }
     }
 }
@@ -93,10 +97,16 @@ pub struct AttentionMaskProof<F: PrimeField> {
 
 impl<N: TensorTypeParam> AttentionMask<N> {
     /// Creates a new mask given the unpadded input shape and the value to use for `-inf`
+    pub fn with_banded_window(mut self, w: usize) -> Self {
+        self.banded_window = Some(w);
+        self
+    }
+
     pub fn new(negative_inf: N) -> AttentionMask<N> {
         AttentionMask {
             negative_infinity: negative_inf,
             span: Default::default(),
+            banded_window: None,
         }
     }
     pub fn with_span(self, span: AttentionSpan) -> anyhow::Result<AttentionMask<N>> {
