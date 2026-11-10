@@ -55,8 +55,8 @@
 | M02 FRI 与哈希承诺 | mod-13 mini-FRI 手跑（含玩具被攻破实验）；BaseFold/WHIR/Binius 与 KZG 族硬对比 | ✅ |
 | M03 数域的选择学 | 小域成本账；"装不下"玩具；F₁₃² 扩展域手造；2-adicity（三种域精确核验） | ✅ |
 | M04 查表论证全景 | 差分劈开恒等式（玩具手验）；四代谱系对比表；DeepProve 选择账与边界 | ✅ |
-| M05 折叠与递归 | Nova 一族；folding×sumcheck 混合；IVC/聚合 | 排期 |
-| M06 安全与攻击者视角 | FS 的 ROM 现状、grinding、健全性预算表、审计清单 | 排期 |
+| M05 折叠与递归 | relaxed R1CS mod-13 手推（对任意 r 精确验证）；IVC；与 chunking 对比 | ✅ |
+| M06 安全与攻击者视角 | 健全性预算表；statement binding 攻击手算；Frozen Heart/Binance 案例；审计清单 8 步 | ✅ |
 | M07 从论文到代码 | claim 卡片 → 最小实现 → fuzz 对拍 → 上游 PR | 实践模块（方法论模板） |
 | M08 顶石设计 | 陌生负载全套设计 + 三位模拟评审答辩 | 实践模块（出师关） |
 
