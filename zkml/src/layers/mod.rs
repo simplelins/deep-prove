@@ -18,6 +18,7 @@ use crate::{
             attention_mask::{
                 ATTENTION_MASK_LAYER, AttentionMask, AttentionMaskCtx, AttentionMaskProof,
             },
+            gather_rows::{GATHER_ROWS_LAYER, GatherRows, GatherRowsCtx, GatherRowsProof},
             embeddings::{EMBEDDINGS_LAYER, Embeddings, EmbeddingsCtx, EmbeddingsProof},
             logits::{ArgmaxHandle, LOGITS_LAYER, Logits, LogitsCtx, LogitsProof},
             normalisation::{
@@ -92,6 +93,7 @@ where
     Embeddings(Embeddings<T>),
     Positional(Positional<T>),
     AttentionMask(AttentionMask<T>),
+    GatherRows(GatherRows),
     Logits(Logits),
     Split(SplitLayer),
     Recombination(RecombinationLayer),
@@ -117,6 +119,7 @@ where
             Layer::Positional(_) => POSITIONAL_LAYER,
             Layer::Logits(_) => LOGITS_LAYER,
             Layer::AttentionMask(_) => ATTENTION_MASK_LAYER,
+            Layer::GatherRows(_) => GATHER_ROWS_LAYER,
             Layer::EinSum(_) => EINSUM_LAYER,
             Layer::Split(_) => SPLIT_LAYER,
             Layer::Recombination(_) => RECOMBINATION_LAYER,
@@ -143,6 +146,7 @@ where
             Layer::Positional(_) => "positional",
             Layer::Logits(_) => "logits",
             Layer::AttentionMask(_) => "attention-mask",
+            Layer::GatherRows(_) => "gather-rows",
             Layer::Split(_) => "split",
             Layer::Recombination(_) => "recombination",
         }
@@ -186,6 +190,7 @@ pub enum LayerCtx<F: PrimeField> {
     Embeddings(EmbeddingsCtx),
     Positional(PositionalCtx),
     AttentionMask(AttentionMaskCtx),
+    GatherRows(GatherRowsCtx),
     Logits(LogitsCtx),
     Split(SplitLayer),
     Recombination(RecombinationLayer),
@@ -214,6 +219,7 @@ where
     Logits(LogitsProof<F, PCS>),
     Positional(PositionalProof<F>),
     AttentionMask(AttentionMaskProof<F>),
+    GatherRows(GatherRowsProof<F, PCS>),
     SplitLayer(SplitLayerProof<F>),
     Recombination(RecombinationProof<F>),
     Dummy, // To be used for non-provable layers
@@ -237,6 +243,7 @@ impl<F: PrimeField> LayerCtx<F> {
             Self::Pooling(_) => "Pooling".to_string(),
             Self::Flatten => "Reshape".to_string(),
             Self::AttentionMask(_) => "AttentionMask".to_string(),
+            Self::GatherRows(_) => "GatherRows".to_string(),
             Self::Split(_) => "Split".to_string(),
             Self::Recombination(_) => "Recombination".to_string(),
         }
@@ -300,6 +307,7 @@ impl<F: PrimeField> LayerCtx<F> {
             LayerCtx::Embeddings(_) => None,
             LayerCtx::Positional(_) => None,
             LayerCtx::AttentionMask(_) => None,
+            LayerCtx::GatherRows(_) => None,
             LayerCtx::Logits(logits_ctx) => Some(logits_ctx.lookup_tables()),
             LayerCtx::Split(_) => None,
             LayerCtx::Recombination(_) => None,
@@ -326,6 +334,7 @@ impl<F: PrimeField> Splittable for LayerCtx<F> {
             LayerCtx::AttentionMask(attention_mask_ctx) => {
                 attention_mask_ctx.ideal_num_chunks(input_shapes)
             }
+            LayerCtx::GatherRows(_) => None,
             LayerCtx::Logits(logits_ctx) => logits_ctx.ideal_num_chunks(input_shapes),
             LayerCtx::Split(_) => None,
             LayerCtx::Recombination(_) => None,
@@ -348,6 +357,7 @@ impl<F: PrimeField> Splittable for LayerCtx<F> {
             LayerCtx::Embeddings(embeddings_ctx) => embeddings_ctx.is_splittable(),
             LayerCtx::Positional(positional_ctx) => positional_ctx.is_splittable(),
             LayerCtx::AttentionMask(attention_mask_ctx) => attention_mask_ctx.is_splittable(),
+            LayerCtx::GatherRows(_) => false,
             LayerCtx::Logits(logits_ctx) => logits_ctx.is_splittable(),
             LayerCtx::Split(_) => false,
             LayerCtx::Recombination(_) => false,
@@ -457,6 +467,7 @@ impl<N: TensorTypeParam> OpInfo for Layer<N> {
             Layer::AttentionMask(attention_mask) => {
                 attention_mask.output_shapes(input_shapes, padding_mode)
             }
+            Layer::GatherRows(gather) => gather.output_shapes(input_shapes, padding_mode),
             Layer::EinSum(einsum) => einsum.output_shapes(input_shapes, padding_mode),
             Layer::Split(split) => split.output_shapes(input_shapes, padding_mode),
             Layer::Recombination(rec) => rec.output_shapes(input_shapes, padding_mode),
@@ -479,6 +490,7 @@ impl<N: TensorTypeParam> OpInfo for Layer<N> {
             Layer::Pooling(pooling) => pooling.num_outputs(num_inputs),
             Layer::Flatten(reshape) => reshape.num_outputs(num_inputs),
             Layer::AttentionMask(attention_mask) => attention_mask.num_outputs(num_inputs),
+            Layer::GatherRows(gather) => gather.num_outputs(num_inputs),
             Layer::EinSum(einsum) => einsum.num_outputs(num_inputs),
             Layer::Split(split) => split.num_outputs(num_inputs),
             Layer::Recombination(rec) => rec.num_outputs(num_inputs),
@@ -501,6 +513,7 @@ impl<N: TensorTypeParam> OpInfo for Layer<N> {
             Layer::Pooling(pooling) => pooling.describe(),
             Layer::Flatten(reshape) => reshape.describe(),
             Layer::AttentionMask(attention_mask) => attention_mask.describe(),
+            Layer::GatherRows(gather) => gather.describe(),
             Layer::EinSum(einsum) => einsum.describe(),
             Layer::Split(split) => split.describe(),
             Layer::Recombination(rec) => rec.describe(),
@@ -523,6 +536,7 @@ impl<N: TensorTypeParam> OpInfo for Layer<N> {
             Layer::Pooling(pooling) => pooling.is_provable(),
             Layer::Flatten(reshape) => reshape.is_provable(),
             Layer::AttentionMask(attention_mask) => attention_mask.is_provable(),
+            Layer::GatherRows(gather) => gather.is_provable(),
             Layer::EinSum(einsum) => einsum.is_provable(),
             Layer::Split(split) => split.is_provable(),
             Layer::Recombination(rec) => rec.is_provable(),
@@ -547,6 +561,7 @@ impl Evaluate<f32> for Layer<f32> {
             Layer::Pooling(pooling) => pooling.evaluate(inputs),
             Layer::Flatten(reshape) => reshape.evaluate(inputs),
             Layer::AttentionMask(attention_mask) => attention_mask.evaluate(inputs),
+            Layer::GatherRows(gather) => gather.evaluate(inputs),
             Layer::EinSum(einsum) => einsum.evaluate(inputs),
             Layer::Split(split) => split.evaluate(inputs),
             Layer::Recombination(rec) => rec.evaluate(inputs),
@@ -571,6 +586,7 @@ impl Evaluate<Element> for Layer<Element> {
             Layer::Pooling(pooling) => pooling.evaluate(inputs),
             Layer::Flatten(reshape) => reshape.evaluate(inputs),
             Layer::AttentionMask(attention_mask) => attention_mask.evaluate(inputs),
+            Layer::GatherRows(gather) => gather.evaluate(inputs),
             Layer::EinSum(einsum) => einsum.evaluate(inputs),
             Layer::Split(split) => split.evaluate(inputs),
             Layer::Recombination(rec) => rec.evaluate(inputs),
@@ -606,6 +622,7 @@ impl ProveInfo for Layer<Element> {
             Layer::Pooling(pooling) => pooling.step_info(aux),
             Layer::Flatten(reshape) => reshape.step_info(aux),
             Layer::AttentionMask(attention_mask) => attention_mask.step_info(aux),
+            Layer::GatherRows(gather) => gather.step_info(aux),
             Layer::EinSum(einsum) => einsum.step_info(aux),
             Layer::Split(split) => split.step_info(aux),
             Layer::Recombination(rec) => rec.step_info(aux),
@@ -635,6 +652,7 @@ impl PadOp for Layer<Element> {
             Layer::AttentionMask(attention_mask) => {
                 Layer::AttentionMask(attention_mask.pad_node(si)?)
             }
+            Layer::GatherRows(gather) => Layer::GatherRows(gather.pad_node(si)?),
             Layer::EinSum(einsum) => Layer::EinSum(einsum.pad_node(si)?),
             Layer::Split(split) => Layer::Split(split.pad_node(si)?),
             Layer::Recombination(rec) => Layer::Recombination(rec.pad_node(si)?),
@@ -744,6 +762,7 @@ where
             Layer::AttentionMask(attention_mask) => {
                 attention_mask.gen_lookup_witness(id, ctx, step_data)
             }
+            Layer::GatherRows(gather) => gather.gen_lookup_witness(id, ctx, step_data),
             Layer::EinSum(einsum) => einsum.gen_lookup_witness(id, ctx, step_data),
             Layer::Split(split) => split.gen_lookup_witness(id, ctx, step_data),
             Layer::Recombination(rec) => rec.gen_lookup_witness(id, ctx, step_data),
@@ -923,6 +942,10 @@ impl QuantizeOp for Layer<f32> {
                 .maybe_requants(output.requant_layer)?
                 .maybe_transform(output.post_quant_rule)?
             }
+            Layer::GatherRows(gather) => {
+                // dtype 保直 pass-through（gather 不改变量化语义）
+                QuantizeOutput::new(Layer::GatherRows(gather), input_scaling.to_vec())
+            }
             Layer::EinSum(einsum) => {
                 let output = einsum.quantize_op::<S>(
                     data,
@@ -964,6 +987,7 @@ where
             Self::Pooling(_) => "Pooling".to_string(),
             Self::Dummy => "Dummy".to_string(),
             Self::AttentionMask(_) => "AttentionMask".to_string(),
+            Self::GatherRows(_) => "GatherRows".to_string(),
             Self::EinSum(_) => "EinSum".to_string(),
             Self::SplitLayer(_) => "Split".to_string(),
             Self::Recombination(_) => "Recombination".to_string(),

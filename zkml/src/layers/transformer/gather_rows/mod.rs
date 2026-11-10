@@ -23,23 +23,47 @@ mod prove;
 
 use crate::backend::Backend;
 use crate::layers::transformer::attention_mask::AttentionSpan;
-use crate::tensor::{TensorTypeParam, WrappedTensor};
+use crate::tensor::WrappedTensor;
+use crate::lookup::logup_gkr::structs::LogUpBatchProof;
+use crate::poly_commit::verifier::VerifierCommitment;
+use dp_crypto::arkyper::CommitmentScheme;
+
+pub const GATHER_ROWS_LAYER: &str = "GATHER";
+
+/// Proving context for the gather layer.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GatherRowsCtx {
+    pub span: AttentionSpan,
+    pub heads_per_kv_head: usize,
+}
+
+/// Proof for the gather layer: the two logUp GKR proofs (the K' query side
+/// and the K table side) whose fraction balance proves the rearrangement,
+/// plus the commitment to the gathered tensor (opened at the logup point).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "F: ark_serialize::CanonicalSerialize",
+    deserialize = "F: ark_serialize::CanonicalDeserialize"
+))]
+pub struct GatherRowsProof<F: ark_ff::PrimeField, PCS: CommitmentScheme> {
+    pub logup_proof_lookup: LogUpBatchProof<F>,
+    pub logup_proof_table: LogUpBatchProof<F>,
+    pub commitments: Vec<VerifierCommitment<PCS>>,
+}
 
 /// GatherRows layer: gathers the rows of K/V according to the sliding-window
 /// map (D1.1 Stage A). See the module docs above.
-#[derive(Debug, Clone)]
-pub struct GatherRows<T> {
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GatherRows {
     pub span: AttentionSpan,
     pub heads_per_kv_head: usize,
-    _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T> GatherRows<T> {
+impl GatherRows {
     pub fn new(span: AttentionSpan, heads_per_kv_head: usize) -> Self {
         Self {
             span,
             heads_per_kv_head,
-            _phantom: std::marker::PhantomData,
         }
     }
 

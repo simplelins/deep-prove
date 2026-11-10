@@ -9,18 +9,16 @@ use burn::tensor::{Tensor as BTensor, TensorData};
 
 use super::*;
 use crate::backend::Backend;
-use crate::tensor::WrappedTensor;
+use crate::tensor::{TensorTypeParam, WrappedTensor};
+use crate::Element;
 
-impl<T> GatherRows<T>
-where
-    T: TensorTypeParam,
-{
+impl GatherRows {
     /// Gathers the rows of `k` according to the window map.
     ///
     /// Inputs: `k` `[Hkv, s, dk]`. Output: `k'` `[Hkv, s, w, dk]` with
     /// `k'[.., i, off, :] = k[.., j(i,off), :]` (clamped positions included;
     /// invalid window positions are masked later by the mask layer).
-    pub(crate) fn evaluate_internal(
+    pub(crate) fn evaluate_internal<T: TensorTypeParam>(
         &self,
         inputs: &[&WrappedTensor<T>],
     ) -> Result<WrappedTensor<T>> {
@@ -71,6 +69,20 @@ where
     }
 }
 
+impl crate::layers::provable::Evaluate<f32> for GatherRows {
+    fn evaluate(&self, inputs: &[&WrappedTensor<f32>]) -> Result<crate::layers::LayerOut<f32>> {
+        let out = self.evaluate_internal(inputs)?;
+        Ok(crate::layers::LayerOut::from_vec(vec![out]))
+    }
+}
+
+impl crate::layers::provable::Evaluate<Element> for GatherRows {
+    fn evaluate(&self, inputs: &[&WrappedTensor<Element>]) -> Result<crate::layers::LayerOut<Element>> {
+        let out = self.evaluate_internal(inputs)?;
+        Ok(crate::layers::LayerOut::from_vec(vec![out]))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,7 +100,7 @@ mod tests {
             &Default::default(),
         );
 
-        let layer: GatherRows<f32> = GatherRows::new(AttentionSpan::Local(w), 1);
+        let layer: GatherRows = GatherRows::new(AttentionSpan::Local(w), 1);
         let k_w = WrappedTensor::<f32>::Rank3 {
             tensor: k.clone(),
             unpadded_shape: burn::prelude::Shape::new([hkv, s, dk]),
@@ -140,7 +152,7 @@ mod tests {
             &Default::default(),
         );
 
-        let layer: GatherRows<f32> = GatherRows::new(AttentionSpan::Local(w), 1);
+        let layer: GatherRows = GatherRows::new(AttentionSpan::Local(w), 1);
         let k_w = WrappedTensor::<f32>::Rank3 {
             tensor: k.clone(),
             unpadded_shape: burn::prelude::Shape::new([hq, s, dk]),

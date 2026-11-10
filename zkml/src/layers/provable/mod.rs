@@ -539,6 +539,19 @@ where
     ) -> anyhow::Result<()>;
 }
 
+pub(crate) fn write_proof_to_transcript_gather<F, PCS, T>(
+    ctx: &crate::layers::transformer::gather_rows::GatherRowsCtx,
+    proof: &crate::layers::transformer::gather_rows::GatherRowsProof<F, PCS>,
+    transcript: &mut T,
+) -> anyhow::Result<()>
+where
+    F: PrimeField,
+    PCS: CommitmentScheme<Field = F>,
+    T: Transcript,
+{
+    <crate::layers::transformer::gather_rows::GatherRowsCtx as VerifiableCtx<F, PCS>>::write_proof_to_transcript(ctx, proof, transcript)
+}
+
 pub(crate) fn verify_input_claim<F, PCS, V, D, A>(
     ctx: &V,
     inputs: &[A],
@@ -653,6 +666,7 @@ impl<F: PrimeField> OpInfo for LayerCtx<F> {
             LayerCtx::EinSum(einsum_ctx) => einsum_ctx.output_shapes(input_shapes, padding_mode),
             LayerCtx::Split(split_ctx) => split_ctx.output_shapes(input_shapes, padding_mode),
             LayerCtx::Recombination(rec_ctx) => rec_ctx.output_shapes(input_shapes, padding_mode),
+            LayerCtx::GatherRows(gather_ctx) => gather_ctx.output_shapes(input_shapes, padding_mode),
         }
     }
 
@@ -677,6 +691,7 @@ impl<F: PrimeField> OpInfo for LayerCtx<F> {
             LayerCtx::EinSum(einsum_ctx) => einsum_ctx.num_outputs(num_inputs),
             LayerCtx::Split(split_ctx) => split_ctx.num_outputs(num_inputs),
             LayerCtx::Recombination(rec_ctx) => rec_ctx.num_outputs(num_inputs),
+            LayerCtx::GatherRows(gather_ctx) => gather_ctx.num_outputs(num_inputs),
         }
     }
 
@@ -699,6 +714,7 @@ impl<F: PrimeField> OpInfo for LayerCtx<F> {
             LayerCtx::EinSum(einsum_ctx) => einsum_ctx.describe(),
             LayerCtx::Split(split_ctx) => split_ctx.describe(),
             LayerCtx::Recombination(rec_ctx) => rec_ctx.describe(),
+            LayerCtx::GatherRows(gather_ctx) => gather_ctx.describe(),
         }
     }
 
@@ -721,9 +737,11 @@ impl<F: PrimeField> OpInfo for LayerCtx<F> {
             LayerCtx::EinSum(einsum_ctx) => einsum_ctx.is_provable(),
             LayerCtx::Split(split_ctx) => split_ctx.is_provable(),
             LayerCtx::Recombination(rec_ctx) => rec_ctx.is_provable(),
+            LayerCtx::GatherRows(gather_ctx) => gather_ctx.is_provable(),
         }
     }
 }
+
 
 impl<F: PrimeField, PCS: CommitmentScheme<Field = F>> VerifiableCtx<F, PCS> for LayerCtx<F> {
     type Proof = LayerProof<F, PCS>;
@@ -785,6 +803,14 @@ impl<F: PrimeField, PCS: CommitmentScheme<Field = F>> VerifiableCtx<F, PCS> for 
             (LayerCtx::Recombination(rec_ctx), LayerProof::Recombination(proof)) => {
                 rec_ctx.verify(proof, last_claims, verifier, shape_step, node_id)
             }
+            (
+                LayerCtx::GatherRows(gather_ctx),
+                LayerProof::GatherRows(gather_proof),
+            ) => gather_ctx.verify(gather_proof, last_claims, verifier, shape_step, node_id),
+            (
+                LayerCtx::GatherRows(gather_ctx),
+                LayerProof::GatherRows(gather_proof),
+            ) => gather_ctx.verify(gather_proof, last_claims, verifier, shape_step, node_id),
             _ => bail!(
                 "Incompatible layer {} and proof {} found",
                 self.describe(),
@@ -982,6 +1008,9 @@ impl<F: PrimeField, PCS: CommitmentScheme<Field = F>> VerifiableCtx<F, PCS> for 
                 verify_input_claim::<F, PCS, _, _, _>(ctx, inputs, claims)
             }
             LayerCtx::EinSum(ctx) => verify_input_claim::<F, PCS, _, _, _>(ctx, inputs, claims),
+            LayerCtx::GatherRows(gather_ctx) => {
+                verify_input_claim::<F, PCS, _, _, _>(gather_ctx, inputs, claims)
+            }
             LayerCtx::Split(ctx) => verify_input_claim::<F, PCS, _, _, _>(ctx, inputs, claims),
             LayerCtx::Recombination(ctx) => {
                 verify_input_claim::<F, PCS, _, _, _>(ctx, inputs, claims)
