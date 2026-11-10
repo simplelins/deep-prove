@@ -53,8 +53,8 @@
 | M00 导师培养方案 | 五级阶梯、六个教学动作、缺口诊断、W13–W24 节奏、出师评分表 | ✅ |
 | M01 设计空间总图 | 算术化×PCS×查表×折叠四轴地图；DeepProve 坐标与五类败局；选型决策树 | ✅ |
 | M02 FRI 与哈希承诺 | mod-13 mini-FRI 手跑（含玩具被攻破实验）；BaseFold/WHIR/Binius 与 KZG 族硬对比 | ✅ |
-| M03 数域的选择学 | 小域/扩展域/2-adicity；三种负载配域 | 排期（下一批） |
-| M04 查表论证全景 | Plookup→Caulk→cq→Baloo→Lasso/Jolt 谱系；LogUp-GKR 坐标 | 排期 |
+| M03 数域的选择学 | 小域成本账；"装不下"玩具；F₁₃² 扩展域手造；2-adicity（三种域精确核验） | ✅ |
+| M04 查表论证全景 | 差分劈开恒等式（玩具手验）；四代谱系对比表；DeepProve 选择账与边界 | ✅ |
 | M05 折叠与递归 | Nova 一族；folding×sumcheck 混合；IVC/聚合 | 排期 |
 | M06 安全与攻击者视角 | FS 的 ROM 现状、grinding、健全性预算表、审计清单 | 排期 |
 | M07 从论文到代码 | claim 卡片 → 最小实现 → fuzz 对拍 → 上游 PR | 实践模块（方法论模板） |
