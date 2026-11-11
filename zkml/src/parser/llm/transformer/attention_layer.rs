@@ -7,6 +7,7 @@ use crate::{
         einsum::EinSum,
         transformer::{
             attention_mask::{AttentionMask, AttentionSpan},
+            gather_rows::GatherRows,
             softmax::Softmax,
         },
     },
@@ -21,6 +22,17 @@ pub(crate) const ATTENTION_QKV_EINSUM_NAME: &str = "attention_qkv_einsum";
 pub(crate) const ATTENTION_QK_EINSUM_NAME: &str = "attention_qk_einsum";
 pub(crate) const ATTENTION_VALUE_EINSUM_NAME: &str = "attention_value_einsum";
 pub(crate) const ATTENTION_OUTPUT_EINSUM_NAME: &str = "attention_output_einsum";
+
+/// 方案 α（D1.1 Stage A）开关：Local span 的注意力走
+/// mask → GatherRows(ScoreWindow) → banded 角掩码 → softmax(w) → AV(A'·V')。
+///
+/// 仅对「单次前向（流式预填）」的运行启用：窗口切片的闭式映射绑定当前
+/// 序列长，与 KV-cache 逐 token 增长路径不兼容。默认关闭（标准路径不变）。
+/// 由 bench-llm 在 `--streaming` 时置位（或手工 `ZKML_ALPHA_SWA=1`）。
+pub(crate) fn alpha_swa_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("ZKML_ALPHA_SWA").is_ok_and(|v| v == "1"))
+}
 
 /// Struct holding the information needed to attach [ConcatenationCache][crate::layers::transformer::ConcatenationCache] to an attention mechanisms QKV projection layer.
 #[derive(Debug, Clone)]
@@ -63,6 +75,17 @@ pub trait AttentionMechanism {
             }
             // Otherwise -> Group Query Attention
             _ => form_gqa_einsum_equations(self.uses_qkv_bias(), self.uses_out_bias()),
+        }
+    }
+
+    /// 方案 α（D1.1 Stage A）：窗口化 AV 方程 —— softmax 输出 A' 的 key 轴
+    /// 收缩为窗口轴 o，V' 为行收集后的 `[h, q, o, d]`（q 轴同时出现在两输入
+    /// 与输出，batch 语义同 GQA 的 h 轴先例）。
+    fn form_windowed_value_equation(&self) -> String {
+        match self.heads_per_kv_head() {
+            1 => "A(hqo)@V(hqod)->O(hqd)".to_string(),
+            n if n == self.total_heads() => "A(hqo)@V(qod)->O(hqd)".to_string(),
+            _ => "A(ghqo)@V(hqod)->O(ghqd)".to_string(),
         }
     }
     /// Returns an [AttentionCacheConfig] indicating how to attach caching to this attention mechanism.
@@ -169,6 +192,16 @@ pub trait AttentionMechanism {
         let query_key_einsum = Self::build_query_key_attention_einsum(query_key_equation)?
             .no_requant()
             .with_name(ATTENTION_QK_EINSUM_NAME.to_owned());
+        // We also get the attention span
+        let attention_span = self.attention_span();
+        let heads_per_kv_head = self.heads_per_kv_head();
+        // 方案 α（Local span + 开关）：AV 的第二输入改为 gather 后的 V'，方程窗口化
+        let alpha_active = matches!(attention_span, AttentionSpan::Local(_)) && alpha_swa_enabled();
+        let attention_value_equation = if alpha_active {
+            self.form_windowed_value_equation()
+        } else {
+            attention_value_equation
+        };
         let attention_value_einsum = Self::build_attention_value_einsum(attention_value_equation)?
             .with_name(ATTENTION_VALUE_EINSUM_NAME.to_owned());
         let (out_weight, out_bias) = self.out_tensors();
@@ -176,8 +209,6 @@ pub trait AttentionMechanism {
             Self::build_output_einsum(output_equation, vec![out_weight], vec![out_bias])?
                 .no_requant()
                 .with_name(ATTENTION_OUTPUT_EINSUM_NAME.to_owned());
-        // We also get the attention span
-        let attention_span = self.attention_span();
         // We insert the query key EinSum into the model (but don't wire it up yet)
         let qkv_einsum_id =
             model.add_consecutive_layer(Layer::EinSum(qkv_einsum), previous_node_id)?;
@@ -219,17 +250,48 @@ pub trait AttentionMechanism {
                 let effective_context_length = effective_context_length
                     .min(max_context_length)
                     .next_power_of_two();
-                // Now in the Softmax layer we know we only have at most effective_context_length non-zero entries (after applying exp)
-                (
-                    mask_id,
-                    model.add_consecutive_layer(
-                        Layer::Softmax(
-                            Softmax::<f32>::new(effective_context_length)
-                                .with_scale(1.0f32 / (head_dim as f32).sqrt()),
-                        ),
+                if alpha_swa_enabled() {
+                    // 方案 α（D1.1 Stage A）：全量分数 → GatherRows(ScoreWindow)
+                    // 窗口切片 → banded 角掩码（clamp 非法位）→ softmax(w)。
+                    // QK/mask 仍全量；softmax 与 AV 消费窗口化张量。
+                    let score_gather_id = model.add_consecutive_layer(
+                        Layer::GatherRows(GatherRows::new_score_window(
+                            attention_span,
+                            heads_per_kv_head,
+                        )),
                         Some(mask_id),
-                    )?,
-                )
+                    )?;
+                    let corner_mask_id = model.add_consecutive_layer(
+                        Layer::AttentionMask(
+                            AttentionMask::<f32>::new(f32::NEG_INFINITY)
+                                .with_span(attention_span)?
+                                .with_banded_window(effective_context_length),
+                        ),
+                        Some(score_gather_id),
+                    )?;
+                    (
+                        mask_id,
+                        model.add_consecutive_layer(
+                            Layer::Softmax(
+                                Softmax::<f32>::new(effective_context_length)
+                                    .with_scale(1.0f32 / (head_dim as f32).sqrt()),
+                            ),
+                            Some(corner_mask_id),
+                        )?,
+                    )
+                } else {
+                    // Now in the Softmax layer we know we only have at most effective_context_length non-zero entries (after applying exp)
+                    (
+                        mask_id,
+                        model.add_consecutive_layer(
+                            Layer::Softmax(
+                                Softmax::<f32>::new(effective_context_length)
+                                    .with_scale(1.0f32 / (head_dim as f32).sqrt()),
+                            ),
+                            Some(mask_id),
+                        )?,
+                    )
+                }
             }
         };
 
@@ -239,7 +301,19 @@ pub trait AttentionMechanism {
             .add_inner(Layer::EinSum(attention_value_einsum))?;
 
         model.add_edge(softmax_id, attention_value_id, (0, 0))?;
-        model.add_edge(qkv_einsum_id, attention_value_id, (2, 1))?;
+        // 方案 α（Local span + 开关）：V 经 GatherRows(Rows) 行收集后进入 AV；
+        // 否则保持 V 直连 QKV。
+        // QKV 的 V 在输出端口 2；α 路径经 GatherRows(Rows)（其输出端口 0）
+        let (v_source_id, v_source_port) = if alpha_active {
+            let v_gather_id = model.graph_mut().add_inner(Layer::GatherRows(
+                GatherRows::new(attention_span, heads_per_kv_head),
+            ))?;
+            model.add_edge(qkv_einsum_id, v_gather_id, (2, 0))?;
+            (v_gather_id, 0)
+        } else {
+            (qkv_einsum_id, 2)
+        };
+        model.add_edge(v_source_id, attention_value_id, (v_source_port, 1))?;
 
         let final_proj_id =
             model.add_consecutive_layer(Layer::EinSum(output_einsum), Some(attention_value_id))?;

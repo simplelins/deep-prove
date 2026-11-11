@@ -22,7 +22,8 @@ where
         let caching_case = unpadded_shape.dims[unpadded_shape.num_dims() - 2] == 1
             && unpadded_shape.dims[unpadded_shape.num_dims() - 1] > 1;
 
-        // D1.1 Stage A：带状分数的角掩码——输入 [h,q,w]，掩 q+off < w-1 的无效位
+        // D1.1 Stage A：带状分数的角掩码——输入 [.., q, w]（Rank3 或 GQA Rank4），
+        // 掩 q+off < w-1 的无效位（与 GatherRows 的 clamp 语义一致）
         if let Some(bw) = self.banded_window {
             let q = unpadded_shape.dims[unpadded_shape.num_dims() - 2];
             let mask_data: Vec<bool> = (0..q * bw)
@@ -37,10 +38,20 @@ where
                 &Default::default(),
             );
             let bshape: burn::tensor::Shape = unpadded_shape.clone().into();
-            let band_mask: BTensor<Backend, 3, Bool> = band_mask
-                .reshape([1, q, bw])
-                .expand::<3, _>(bshape);
-            let unpadded_output = input.mask_fill_3d(band_mask, self.negative_infinity)?;
+            let unpadded_output = match &input {
+                WrappedTensor::Rank4 { .. } => {
+                    // [g,h,q,w]：掩码 [1,1,q,w] expand 到 4 维
+                    let band_mask: BTensor<Backend, 4, Bool> = band_mask
+                        .reshape([1, 1, q, bw])
+                        .expand::<4, _>(bshape);
+                    input.mask_fill_4d(band_mask, self.negative_infinity)?
+                }
+                _ => {
+                    let band_mask: BTensor<Backend, 3, Bool> =
+                        band_mask.reshape([1, q, bw]).expand::<3, _>(bshape);
+                    input.mask_fill_3d(band_mask, self.negative_infinity)?
+                }
+            };
             return Ok(unpadded_output);
         }
 

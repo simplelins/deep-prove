@@ -147,6 +147,12 @@ struct LLMArgs {
     #[arg(long, default_value_t = false)]
     streaming: bool,
 
+    /// D1.1 方案 α：Local-span 注意力走 banded 路径（分数窗口切片 gather +
+    /// 角掩码 + softmax 窗口化 + V 行收集）。仅对单次前向（流式预填）安全，
+    /// 与 KV-cache 逐 token 路径不兼容，故 requires streaming。
+    #[arg(long, default_value_t = false, requires = "streaming")]
+    alpha_swa: bool,
+
     /// Memory budget per streaming segment, in MB (default 512).
     #[arg(long, default_value_t = 512, requires = "streaming")]
     stream_budget_mb: usize,
@@ -242,6 +248,12 @@ fn main() -> anyhow::Result<()> {
     timed_core::set_output(Output::CSV("bench-llm.csv".to_string()));
 
     let args = LLMArgs::parse();
+
+    // D1.1 方案 α 开关（parser 的 alpha_swa_enabled 经 env 读取，模型解析前置位）
+    if args.alpha_swa {
+        // SAFETY: main 起点单线程，任何解析线程尚未启动
+        unsafe { std::env::set_var("ZKML_ALPHA_SWA", "1") };
+    }
 
     // either its spceified and if 0 it's the physical cores otherwise what is specified but no more than the logical cores
     let num_threads = if let Some(nt) = args.num_threads {
