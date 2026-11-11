@@ -91,6 +91,7 @@ where
         if let Ok(input_now) = step.input_tensor_at(0) {
             crate::lookup::p1_probe::check_prove_input(
                 node_id,
+                0,
                 input_now.data(),
                 &input_now.shape().clone(),
             );

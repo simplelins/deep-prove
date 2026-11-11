@@ -384,6 +384,20 @@ where
                 debug!("Streaming: step for node {node_id} outside any chunk, ignoring");
                 continue;
             };
+            // P1 哈希链 forward 侧：记录各输入端口的张量哈希（run 线程、
+            // witness-gen 之前）。键 = (node, port) 组合；witness-gen/prove
+            // 侧只查 port 0。仅 p1-debug。
+            #[cfg(feature = "p1-debug")]
+            if let Ok(inputs) = step.input_tensors() {
+                for (port, tensor) in inputs.iter().enumerate() {
+                    crate::lookup::p1_probe::record_forward_input(
+                        node_id,
+                        port,
+                        tensor.data(),
+                        &tensor.shape(),
+                    );
+                }
+            }
             self.steps.entry(chunk_id).or_default().insert(node_id, step);
         }
     }
