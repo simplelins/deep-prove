@@ -23,11 +23,20 @@ impl RMSNorm<Element> {
         let input = step.input_tensor_at(0)?;
         let input_shape = input.shape().clone();
 
-        // P1 探针 B（真突变检测）：重算输出 vs step 存储输出逐元素对照。
-        // witness 全部由当前输入重算，若与前向时存储的输出不一致，
-        // 说明输入张量（或 norm proving data）在 forward 之后被改写。
+        // P1 探针 B（真突变检测）：witness 输出列 vs step 存储输出逐元素对照。
+        // 注意：比较对象必须是 generate_witness 产出的输出列（协议真实使用的
+        // 数据），而不是 rmsnorm_data.apply 的直接产物——gemma3 的 (1+w) 处理
+        // 使 apply 路径与 forward evaluate 不同（实测对所有节点都会 DIFF，
+        // 是探针误报源）。下游 consumer 的 claim 链锚定在存储张量上，
+        // witness 输出列与存储张量不一致 = P1 签名（self-check 触发的根源）。
         #[cfg(feature = "p1-debug")]
-        let stored_output = step.output_tensor_at(0).ok().map(|t| t.data().clone());
+        let stored_output = step.output_tensor_at(0).ok().map(|t| {
+            let mut d = t.data().clone();
+            // pad 到 2 的幂（与 witness 列的 padding 一致，0 填充段跳过比较）
+            let pad = d.len().next_power_of_two() - d.len();
+            d.extend(std::iter::repeat_n(0i64, pad));
+            d
+        });
 
         let (_, normalisation_scaling_factor) = self.get_quantisation_scaling_factors().ok_or(
             anyhow!("Quantisation scaling factors not found for RMSNorm lookup witness generation"),
@@ -39,37 +48,6 @@ impl RMSNorm<Element> {
         let scaled = wrapped_input.mul(rmsnorm_data.normalisation.clone())?;
         let scaled_input = Tensor::try_from(&scaled)?;
         let output = Tensor::try_from(&lookup_output)?;
-
-        // P1 探针 B（续）
-        #[cfg(feature = "p1-debug")]
-        if let Some(stored) = &stored_output {
-            let recomputed = output.data();
-            if stored.len() == recomputed.len() {
-                let mismatches = stored
-                    .iter()
-                    .zip(recomputed.iter())
-                    .enumerate()
-                    .filter(|(_, (a, b))| a != b)
-                    .count();
-                if mismatches > 0 {
-                    let first = stored
-                        .iter()
-                        .zip(recomputed.iter())
-                        .position(|(a, b)| a != b);
-                    eprintln!(
-                        "[p1-rms] node {id}: 存储输出 ≠ 重算输出（{mismatches} 处不一致，首个 idx {first:?}，stored {:?} vs recomputed {:?}）",
-                        first.and_then(|i| stored.get(i)),
-                        first.and_then(|i| recomputed.get(i)),
-                    );
-                }
-            } else {
-                eprintln!(
-                    "[p1-rms] node {id}: 存储输出长度 {} ≠ 重算长度 {}",
-                    stored.len(),
-                    recomputed.len()
-                );
-            }
-        }
 
         // P1 探针 C（记录侧）：witness-gen 时刻的输入张量哈希入表，
         // prove 侧（generic_prove）对照 —— 抓 witness-gen → prove 窗口。
@@ -98,6 +76,37 @@ impl RMSNorm<Element> {
 
         let input_evals = lookup_witness.input_mle_evals::<F>(table.num_columns());
         let output_evals = lookup_witness.output_mle_evals::<F>();
+
+        // P1 探针 B（续）：witness 输出列 vs 存储输出（此时 output_evals 已生成）
+        #[cfg(feature = "p1-debug")]
+        if let Some(stored) = &stored_output {
+            if let Some(wit_col) = output_evals.first() {
+                if stored.len() == wit_col.len() {
+                    let mismatches = stored
+                        .iter()
+                        .zip(wit_col.iter())
+                        .enumerate()
+                        .filter(|(_, (v, e))| F::from(**v) != **e)
+                        .count();
+                    if mismatches > 0 {
+                        let first = stored
+                            .iter()
+                            .zip(wit_col.iter())
+                            .position(|(v, e)| F::from(*v) != *e);
+                        eprintln!(
+                            "[p1-rms] node {id}: witness 输出列 ≠ 存储输出（{mismatches} 处不一致，首个 idx {first:?}）"
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "[p1-rms] node {id}: witness 输出列长度 {} ≠ 存储长度 {}（列布局未知，跳过）",
+                        wit_col.len(),
+                        stored.len()
+                    );
+                }
+            }
+        }
+
 
         // Make the commitments to the multipliers
         let dim_size = if rank >= 2 { input_shape[rank - 2] } else { 1 };
