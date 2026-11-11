@@ -22,6 +22,13 @@ impl RMSNorm<Element> {
 
         let input = step.input_tensor_at(0)?;
         let input_shape = input.shape().clone();
+
+        // P1 探针 B（真突变检测）：重算输出 vs step 存储输出逐元素对照。
+        // witness 全部由当前输入重算，若与前向时存储的输出不一致，
+        // 说明输入张量（或 norm proving data）在 forward 之后被改写。
+        #[cfg(feature = "p1-debug")]
+        let stored_output = step.output_tensor_at(0).ok().map(|t| t.data().clone());
+
         let (_, normalisation_scaling_factor) = self.get_quantisation_scaling_factors().ok_or(
             anyhow!("Quantisation scaling factors not found for RMSNorm lookup witness generation"),
         )?;
@@ -32,6 +39,42 @@ impl RMSNorm<Element> {
         let scaled = wrapped_input.mul(rmsnorm_data.normalisation.clone())?;
         let scaled_input = Tensor::try_from(&scaled)?;
         let output = Tensor::try_from(&lookup_output)?;
+
+        // P1 探针 B（续）
+        #[cfg(feature = "p1-debug")]
+        if let Some(stored) = &stored_output {
+            let recomputed = output.data();
+            if stored.len() == recomputed.len() {
+                let mismatches = stored
+                    .iter()
+                    .zip(recomputed.iter())
+                    .enumerate()
+                    .filter(|(_, (a, b))| a != b)
+                    .count();
+                if mismatches > 0 {
+                    let first = stored
+                        .iter()
+                        .zip(recomputed.iter())
+                        .position(|(a, b)| a != b);
+                    eprintln!(
+                        "[p1-rms] node {id}: 存储输出 ≠ 重算输出（{mismatches} 处不一致，首个 idx {first:?}，stored {:?} vs recomputed {:?}）",
+                        first.and_then(|i| stored.get(i)),
+                        first.and_then(|i| recomputed.get(i)),
+                    );
+                }
+            } else {
+                eprintln!(
+                    "[p1-rms] node {id}: 存储输出长度 {} ≠ 重算长度 {}",
+                    stored.len(),
+                    recomputed.len()
+                );
+            }
+        }
+
+        // P1 探针 C（记录侧）：witness-gen 时刻的输入张量哈希入表，
+        // prove 侧（generic_prove）对照 —— 抓 witness-gen → prove 窗口。
+        #[cfg(feature = "p1-debug")]
+        crate::lookup::p1_probe::record_witness_input(id, input.data(), &input_shape);
 
         let rank = input_shape.rank();
         let number_of_chunks = input_shape[..rank.saturating_sub(2)]

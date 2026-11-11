@@ -25,6 +25,7 @@ impl LookupInputConfig {
     /// This method proves the Sumcheck that links the lookup argument to the inputs/outputs of the layer. It takes in the MLEs of the witnesses used in the Sumcheck expression, the current claim, the point used in the lookup proof and optionally the MLE of the weights (if this is a normalisation variant). It returns the sumcheck proof and the evaluations of the witness MLEs at the sumcheck point.
     pub fn prove_linking_sumcheck<F, T>(
         &self,
+        node_id: crate::graph::NodeId,
         mles: &[DensePolynomial<F>],
         transcript: &mut T,
         last_claim: &Claim<F>,
@@ -49,7 +50,7 @@ impl LookupInputConfig {
         batching_challenges.extend(other_challenges);
         #[cfg(feature = "p1-debug")]
         eprintln!(
-            "[p1-linking] PROVE claim={:?} sum_ch={:?} other_ch={:?} mles={} lens={:?} logup_point0={:?}",
+            "[p1-linking] PROVE node={node_id} claim={:?} sum_ch={:?} other_ch={:?} mles={} lens={:?} logup_point0={:?}",
             last_claim.evaluation().into_bigint(),
             sum_challenge.into_bigint(),
             batching_challenges.iter().skip(1).map(|c| c.into_bigint()).collect::<Vec<_>>(),
@@ -87,6 +88,7 @@ impl LookupInputConfig {
         #[cfg(any(test, feature = "p1-debug"))]
         {
             self.debug_linking_sumcheck(
+                node_id,
                 mles,
                 last_claim,
                 &weight_mle,
@@ -139,6 +141,7 @@ mod test_utils {
     impl LookupInputConfig {
         pub(crate) fn debug_linking_sumcheck<F>(
             &self,
+            node_id: crate::graph::NodeId,
             mles: &[DensePolynomial<F>],
             last_claim: &Claim<F>,
             weight_mle: &Option<DensePolynomial<F>>,

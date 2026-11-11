@@ -80,10 +80,22 @@ where
 {
     // First we get the layer commitment and extract it into parts
     #[cfg(feature = "p1-debug")]
-    eprintln!(
-        "[p1-debug] PROVE lookup_op node {node_id} claim_eval={} table={}",
-        last_claim.eval.into_bigint(), table.name()
-    );
+    {
+        eprintln!(
+            "[p1-debug] PROVE lookup_op node {node_id} claim_eval={} table={}",
+            last_claim.eval.into_bigint(), table.name()
+        );
+        // P1 探针 C（对照侧）：prove 时刻输入张量哈希 vs witness-gen 记录。
+        // 注：不做「claim vs to_field_mle 直评」类探针——lookup 路径的 claim
+        // 带非零 padding 修正 + 列组织约定，直评在通过运行中也会 DIFF（已实测）。
+        if let Ok(input_now) = step.input_tensor_at(0) {
+            crate::lookup::p1_probe::check_prove_input(
+                node_id,
+                input_now.data(),
+                &input_now.shape().clone(),
+            );
+        }
+    }
     let layer_commitment = prover.lookup_witness(node_id)?;
 
     let (layer_polys, commitments): (Vec<_>, Vec<_>) = layer_commitment
@@ -229,6 +241,7 @@ where
 
     // Generate the linking sumcheck proof
     let (sumcheck_proof, challenges) = input_config.prove_linking_sumcheck(
+        node_id,
         &mles,
         prover.transcript,
         last_claim,
