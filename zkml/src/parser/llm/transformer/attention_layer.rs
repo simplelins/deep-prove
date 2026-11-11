@@ -7,7 +7,6 @@ use crate::{
         einsum::EinSum,
         transformer::{
             attention_mask::{AttentionMask, AttentionSpan},
-            gather_rows::GatherRows,
             softmax::Softmax,
         },
     },
@@ -167,10 +166,10 @@ pub trait AttentionMechanism {
         let (weights, biases) = self.qkv_tensors();
         let qkv_einsum = Self::build_qkv_einsum(qkv_equation, weights, biases)?
             .with_name(ATTENTION_QKV_EINSUM_NAME.to_owned());
-        let query_key_einsum = Self::build_query_key_attention_einsum(query_key_equation.clone())?
+        let query_key_einsum = Self::build_query_key_attention_einsum(query_key_equation)?
             .no_requant()
             .with_name(ATTENTION_QK_EINSUM_NAME.to_owned());
-        let attention_value_einsum = Self::build_attention_value_einsum(attention_value_equation.clone())?
+        let attention_value_einsum = Self::build_attention_value_einsum(attention_value_equation)?
             .with_name(ATTENTION_VALUE_EINSUM_NAME.to_owned());
         let (out_weight, out_bias) = self.out_tensors();
         let output_einsum =
@@ -210,85 +209,27 @@ pub trait AttentionMechanism {
                 )
             }
             AttentionSpan::Local(effective_context_length) => {
-                let w = effective_context_length.min(max_context_length).next_power_of_two();
-
-                // D1.1 Stage A：带状路径——K/V 经 GatherRows 缩窗后接带状 einsum
-                let gather_k_id = model
-                    .graph_mut()
-                    .add_inner(Layer::GatherRows(GatherRows::new(
-                        attention_span,
-                        1, // heads_per_kv_head: gather 逐 kv 头，einsum 广播 g
-                    )))?;
-                let gather_v_id = model
-                    .graph_mut()
-                    .add_inner(Layer::GatherRows(GatherRows::new(
-                        attention_span,
-                        1,
-                    )))?;
-                // 连接：K = qkv 输出 1，V = qkv 输出 2
-                model.add_edge(qkv_einsum_id, gather_k_id, (1, 0))?;
-                model.add_edge(qkv_einsum_id, gather_v_id, (2, 0))?;
-
-                // 带状 QK einsum：Q(ghqd)@K'(hsod)->A(ghqo)
-                let (qk_banded, av_banded) = form_banded_equations(
-                    &query_key_equation,
-                    &attention_value_equation,
-                );
-                let qk_banded_einsum =
-                    Self::build_query_key_attention_einsum(qk_banded)?
-                        .no_requant()
-                        .with_name(format!("{ATTENTION_QK_EINSUM_NAME}_banded"));
-                let qk_banded_id = model
-                    .graph_mut()
-                    .add_inner(Layer::EinSum(qk_banded_einsum))?;
-                model.add_edge(qkv_einsum_id, qk_banded_id, (0, 0))?;
-                model.add_edge(gather_k_id, qk_banded_id, (0, 1))?;
-
-                // 带状 mask（[q,w] 角掩码）
+                // Insert the attention mask layer with local span
                 let mask_id = model.add_consecutive_layer(
                     Layer::AttentionMask(
-                        AttentionMask::<f32>::new(f32::NEG_INFINITY)
-                            .with_span(attention_span)?
-                            .with_banded_window(w),
+                        AttentionMask::<f32>::new(f32::NEG_INFINITY).with_span(attention_span)?,
                     ),
-                    Some(qk_banded_id),
+                    Some(query_key_id),
                 )?;
-
-                // softmax 窗口长度 = w
-                let softmax_id = model.add_consecutive_layer(
-                    Layer::Softmax(
-                        Softmax::<f32>::new(w)
-                            .with_scale(1.0f32 / (head_dim as f32).sqrt()),
-                    ),
-                    Some(mask_id),
-                )?;
-
-                // 带状 AV einsum：A(ghqo)@V'(hsod)->O(ghqd)
-                let av_banded_einsum =
-                    Self::build_attention_value_einsum(av_banded)?
-                        .with_name(format!("{ATTENTION_VALUE_EINSUM_NAME}_banded"));
-                let attention_value_id = model
-                    .graph_mut()
-                    .add_inner(Layer::EinSum(av_banded_einsum))?;
-                model.add_edge(softmax_id, attention_value_id, (0, 0))?;
-                model.add_edge(gather_v_id, attention_value_id, (0, 1))?;
-
-                // 输出投影（与 Full 路径共用方程）
-                let final_proj_id = model.add_consecutive_layer(
-                    Layer::EinSum(output_einsum),
-                    Some(attention_value_id),
-                )?;
-                return Ok((
-                    final_proj_id,
-                    AttentionMetadata {
-                        qkv_id: qkv_einsum_id,
-                        qkt_id: qk_banded_id,
-                        mask_id,
-                        softmax_id,
-                        residual_id: attention_value_id,
-                        final_proj_id,
-                    },
-                ));
+                let effective_context_length = effective_context_length
+                    .min(max_context_length)
+                    .next_power_of_two();
+                // Now in the Softmax layer we know we only have at most effective_context_length non-zero entries (after applying exp)
+                (
+                    mask_id,
+                    model.add_consecutive_layer(
+                        Layer::Softmax(
+                            Softmax::<f32>::new(effective_context_length)
+                                .with_scale(1.0f32 / (head_dim as f32).sqrt()),
+                        ),
+                        Some(mask_id),
+                    )?,
+                )
             }
         };
 
@@ -377,21 +318,6 @@ fn form_mqa_einsum_equations(uses_qkv_bias: bool, uses_out_bias: bool) -> [Strin
 }
 
 /// Forms the einsum equations for Group Query Attention.
-/// D1.1 Stage A：带状路径的 QK/AV 方程（K'/V' 经 gather 后带窗口轴 'o'）。
-/// 返回 [qk, av] 两条方程；GQA/MQA/MHA 共用同一模式（g 仅出现在 Q/A 侧）。
-fn form_banded_equations(qk_eq: &str, av_eq: &str) -> (String, String) {
-    // 原始："Q(..ghqd)@K(hsd)->A(ghqs)" / "A(ghqs)@V(hsd)->O(ghqd)"
-    // 带状：K/V 先经 gather → K'(hsod)/V'(hsod)（o = 窗口偏移）
-    // 方程把 s 轴替换为 (s,o) 组合轴：A(ghqo) = Σ_d Q(ghqd)·K'(hsod)
-    let qk_banded = qk_eq
-        .replace("K(hsd)", "K'(hsod)")
-        .replace("->A(ghqs)", "->A(ghqo)");
-    let av_banded = av_eq
-        .replace("V(hsd)", "V'(hsod)")
-        .replace("A(ghqs)", "A(ghqo)");
-    (qk_banded, av_banded)
-}
-
 fn form_gqa_einsum_equations(uses_qkv_bias: bool, uses_out_bias: bool) -> [String; 4] {
     // 'h' represent the number of key-value heads, 'g' the number of query heads per kv head, 'd' the head dimension
     // 's' is the sequence length and 'e' is the embedding dimension.
