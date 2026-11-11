@@ -807,10 +807,6 @@ impl<F: PrimeField, PCS: CommitmentScheme<Field = F>> VerifiableCtx<F, PCS> for 
                 LayerCtx::GatherRows(gather_ctx),
                 LayerProof::GatherRows(gather_proof),
             ) => gather_ctx.verify(gather_proof, last_claims, verifier, shape_step, node_id),
-            (
-                LayerCtx::GatherRows(gather_ctx),
-                LayerProof::GatherRows(gather_proof),
-            ) => gather_ctx.verify(gather_proof, last_claims, verifier, shape_step, node_id),
             _ => bail!(
                 "Incompatible layer {} and proof {} found",
                 self.describe(),

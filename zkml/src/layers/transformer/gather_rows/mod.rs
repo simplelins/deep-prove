@@ -30,11 +30,28 @@ use dp_crypto::arkyper::CommitmentScheme;
 
 pub const GATHER_ROWS_LAYER: &str = "GATHER";
 
+/// The gather variant.
+///
+/// - `Rows`: the K/V row gather `K'[h, i, off, d] = K[h, j(i,off), d]` —
+///   the banded einsums consume the gathered tensors (Stage A / plan β).
+/// - `ScoreWindow`: the score-tensor window slice
+///   `A'[.., i, off] = A[.., i, j(i,off)]` along the last (key) axis —
+///   plan α's mask→softmax insertion (the softmax then runs over the window
+///   and the AV einsum consumes the gathered V).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum GatherMode {
+    #[default]
+    Rows,
+    ScoreWindow,
+}
+
 /// Proving context for the gather layer.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GatherRowsCtx {
     pub span: AttentionSpan,
     pub heads_per_kv_head: usize,
+    #[serde(default)]
+    pub mode: GatherMode,
 }
 
 /// Proof for the gather layer: the two logUp GKR proofs (the K' query side
@@ -51,12 +68,14 @@ pub struct GatherRowsProof<F: ark_ff::PrimeField, PCS: CommitmentScheme> {
     pub commitments: Vec<VerifierCommitment<PCS>>,
 }
 
-/// GatherRows layer: gathers the rows of K/V according to the sliding-window
-/// map (D1.1 Stage A). See the module docs above.
+/// GatherRows layer: the gather operator for banded attention (D1.1 Stage A).
+/// See [`GatherMode`] for the two variants.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct GatherRows {
     pub span: AttentionSpan,
     pub heads_per_kv_head: usize,
+    #[serde(default)]
+    pub mode: GatherMode,
 }
 
 impl GatherRows {
@@ -64,6 +83,15 @@ impl GatherRows {
         Self {
             span,
             heads_per_kv_head,
+            mode: GatherMode::Rows,
+        }
+    }
+
+    pub fn new_score_window(span: AttentionSpan, heads_per_kv_head: usize) -> Self {
+        Self {
+            span,
+            heads_per_kv_head,
+            mode: GatherMode::ScoreWindow,
         }
     }
 
@@ -82,6 +110,21 @@ pub(crate) fn gather_source_index(t: usize, w: usize, s: usize) -> usize {
     let off = t % w;
     let j_i64 = i as i64 - (w as i64 - 1) + off as i64;
     j_i64.clamp(0, s as i64 - 1) as usize
+}
+
+/// Source row index for the flattened `[Hkv·s·w]` output row `t` over the
+/// flattened `[Hkv·s]` input rows (row-major `[Hkv, s, dk]` view of K/V).
+/// The window map is head-relative: every head repeats the same
+/// `i → clamp(i-(w-1)+off)` gather over its own `s` rows.
+#[inline]
+pub(crate) fn gather_source_row(t: usize, w: usize, s: usize) -> usize {
+    let per_head_out = s * w;
+    let head = t / per_head_out;
+    let i = (t % per_head_out) / w;
+    let off = t % w;
+    let j_i64 = i as i64 - (w as i64 - 1) + off as i64;
+    let j = j_i64.clamp(0, s as i64 - 1) as usize;
+    head * s + j
 }
 
 /// Whether the window position `t` is valid (its source index is inside the
@@ -103,6 +146,45 @@ pub(crate) fn gather_multiplicities(w: usize, s: usize) -> Vec<u64> {
     let mut mult = vec![0u64; s];
     for t in 0..s * w {
         mult[gather_source_index(t, w, s)] += 1;
+    }
+    mult
+}
+
+/// The head-tiled multiplicity histogram over the flattened `[Hkv·s]` input
+/// rows: every head repeats the same per-head histogram.
+pub(crate) fn gather_multiplicities_rows(w: usize, s: usize, heads: usize) -> Vec<u64> {
+    let per_head = gather_multiplicities(w, s);
+    let mut mult = Vec::with_capacity(per_head.len() * heads);
+    for _ in 0..heads {
+        mult.extend_from_slice(&per_head);
+    }
+    mult
+}
+
+/// Source cell index for the ScoreWindow variant: for the flattened
+/// `[L·q·w]` output position `t`（行主序 `[L, q, w]`，L = 前导轴折叠），
+/// 返回输入 `[L, q, s]` 行主序 cell id `l·(q·s) + i·s + j(i,off)`，
+/// 其中 `j(i,off) = clamp(i-(w-1)+off, 0, s-1)` —— 与行收集同一闭式映射，
+/// 只是作用在最后一轴（key 轴）上。
+#[inline]
+pub(crate) fn score_window_source_cell(t: usize, w: usize, q: usize, s: usize) -> usize {
+    let per_head_out = q * w;
+    let head = t / per_head_out;
+    let i = (t % per_head_out) / w;
+    let off = t % w;
+    let j_i64 = i as i64 - (w as i64 - 1) + off as i64;
+    let j = j_i64.clamp(0, s as i64 - 1) as usize;
+    head * (q * s) + i * s + j
+}
+
+/// ScoreWindow 的 cell 重数直方图（数据无关闭式）：输出位置 t 复制输入
+/// cell `score_window_source_cell(t)`，对 `[L·q·s]` 个 cell 计数。
+///
+/// 不变量：Σ mult = L·q·w（每个输出 cell 恰好复制一个输入 cell）。
+pub(crate) fn score_window_multiplicities(w: usize, q: usize, s: usize, heads: usize) -> Vec<u64> {
+    let mut mult = vec![0u64; heads * q * s];
+    for t in 0..heads * q * w {
+        mult[score_window_source_cell(t, w, q, s)] += 1;
     }
     mult
 }
