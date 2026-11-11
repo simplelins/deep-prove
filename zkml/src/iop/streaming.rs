@@ -388,14 +388,27 @@ where
             // witness-gen 之前）。键 = (node, port) 组合；witness-gen/prove
             // 侧只查 port 0。仅 p1-debug。
             #[cfg(feature = "p1-debug")]
-            if let Ok(inputs) = step.input_tensors() {
-                for (port, tensor) in inputs.iter().enumerate() {
-                    crate::lookup::p1_probe::record_forward_input(
-                        node_id,
-                        port,
-                        tensor.data(),
-                        &tensor.shape(),
-                    );
+            {
+                if let Ok(inputs) = step.input_tensors() {
+                    for (port, tensor) in inputs.iter().enumerate() {
+                        crate::lookup::p1_probe::record_forward_input(
+                            node_id,
+                            port,
+                            tensor.data(),
+                            &tensor.shape(),
+                        );
+                    }
+                }
+                // 输出张量：键 port+8（witness-gen 侧对输出用 port+8 对照）
+                if let Ok(outputs) = step.output_tensors() {
+                    for (port, tensor) in outputs.iter().enumerate() {
+                        crate::lookup::p1_probe::record_forward_input(
+                            node_id,
+                            port + 8,
+                            tensor.data(),
+                            &tensor.shape(),
+                        );
+                    }
                 }
             }
             self.steps.entry(chunk_id).or_default().insert(node_id, step);

@@ -37,8 +37,20 @@ impl RMSNorm<Element> {
 
         // P1 哈希链 witness-gen 侧：对照 forward 哈希（抓 forward→witness-gen
         // 窗口 B），并记录当前哈希供 prove 侧对照（窗口 A）。
+        // 输入（port 0）与输出（port 8）都对照——输出改写会让 consumer 的
+        // witness 冻结新值而本节点从稳定输入重算旧值（P1 全部签名）。
         #[cfg(feature = "p1-debug")]
-        crate::lookup::p1_probe::check_witness_input(id, 0, input.data(), &input_shape);
+        {
+            crate::lookup::p1_probe::check_witness_input(id, 0, input.data(), &input_shape);
+            if let Ok(out_now) = step.output_tensor_at(0) {
+                crate::lookup::p1_probe::check_witness_input(
+                    id,
+                    8,
+                    out_now.data(),
+                    &out_now.shape().clone(),
+                );
+            }
+        }
 
         let rank = input_shape.rank();
         let number_of_chunks = input_shape[..rank.saturating_sub(2)]

@@ -70,7 +70,8 @@ mod imp {
     }
 
     /// witness-gen 侧：对照 forward 记录（窗口 B），并记录当前哈希（供
-    /// prove 侧对照窗口 A）。
+    /// prove 侧对照窗口 A）。输出张量用 port+8 的键位（step.outputs 的
+    /// ingest 侧以 port+8 记录）。
     pub fn check_witness_input(node_id: NodeId, port: usize, data: &[Element], shape: &[usize]) {
         let now_hash = fnv_tensor(data, shape);
         // 1) vs forward（窗口 B）
@@ -84,6 +85,7 @@ mod imp {
                 );
             }
         }
+        let _ = now_hash;
         // 2) 记录供 prove 对照（窗口 A）
         with_map(&WITNESS_INPUT_HASHES, |m| {
             m.insert(key(node_id, port), (now_hash, shape.to_vec()));
