@@ -594,9 +594,17 @@ where
             chunk_layers,
         } = task;
         let seed = seed_chain.seed();
-        let proof = measure::r("streaming_chunk_prove", || {
+        let proof = match measure::r("streaming_chunk_prove", || {
             prove_task::<F, T, PCS>(ctx, seed, chunk, &chunk_trace, &chunk_layers)
-        })?;
+        }) {
+            Ok(p) => p,
+            Err(e) => {
+                // 证明线程的原始错误必须可见：run loop 只会看到 send 失败的
+                // 泛化消息，真实 cause 在这里
+                eprintln!("[streaming-prover] chunk {chunk_id} prove failed: {e:#}");
+                return Err(e);
+            }
+        };
         // absorb the proven chunk and derive the next seed (W2)
         let model_chunk = proof.chunk_data.model_chunk.clone();
         let commitments = proof.chunk_data.commitments.clone();

@@ -63,23 +63,26 @@ pub fn build_gather_logup_inputs<F: PrimeField>(
     k: &[Vec<F>],
     w: usize,
     heads: usize,
+    s_unpadded_rows: usize,
     constant_challenge: F,
     column_separation_challenge: F,
 ) -> anyhow::Result<(LogUpInput<F>, LogUpInput<F>)> {
     let rows = k.len();
     ensure!(rows % heads == 0, "row count must be a multiple of heads");
-    let s = rows / heads;
+    let s_pad = rows / heads;
     let dk = k.first().map(|r| r.len()).unwrap_or(0);
     ensure!(rows.is_power_of_two(), "source rows must be a power of two (padded)");
     ensure!(w.is_power_of_two(), "window must be a power of two (padded)");
     let t_len = rows * w;
     let _ = num_vars_of(t_len);
+    // clamp 用 unpadded s（调用方经 s_unpadded 传入；k 的 padded 行零填充）
+    let s_unpadded = s_unpadded_rows;
 
     // Lookup side: K'[t, d] = K[gather_source_row(t), d] columns + the source
     // row index column, padded to 2^{n_t} rows.
     let mut lookup_cols = vec![Vec::with_capacity(t_len); dk + 1];
     for t in 0..t_len {
-        let j = gather_source_row(t, w, s);
+        let j = gather_source_row(t, w, s_pad, s_unpadded);
         for d in 0..dk {
             lookup_cols[d].push(k[j][d]);
         }
@@ -88,7 +91,7 @@ pub fn build_gather_logup_inputs<F: PrimeField>(
 
     // Table side: K[j, d] columns + the index column + the head-tiled
     // multiplicities, padded to 2^{n_table} rows.
-    let multiplicities_raw = gather_multiplicities_rows(w, s, heads);
+    let multiplicities_raw = gather_multiplicities_rows(w, s_pad, s_unpadded, heads);
     let mut table_cols = vec![Vec::with_capacity(rows); dk + 1];
     for j in 0..rows {
         for d in 0..dk {
@@ -183,22 +186,25 @@ pub fn build_score_window_logup_inputs<F: PrimeField>(
     constant_challenge: F,
     column_separation_challenge: F,
 ) -> anyhow::Result<(LogUpInput<F>, LogUpInput<F>)> {
-    ensure!(q.is_power_of_two() && s.is_power_of_two() && w.is_power_of_two());
-    ensure!(q * s == scores_flat.len() / heads, "cell count mismatch");
+    ensure!(q.is_power_of_two() && w.is_power_of_two());
+    ensure!(scores_flat.len() == heads * q * s, "cell count mismatch");
     let cells = scores_flat.len();
     let t_len = heads * q * w;
     ensure!(cells.is_power_of_two() && t_len.is_power_of_two());
+    // clamp 用 unpadded s（源张量的真实 key 轴长），网格/stride 用 padded s
+    let s_unpadded = s;
+    let s = s; // s 即 padded 网格（调用方保证 scores_flat 已按 padded grid 展开）
 
     // 查询侧：out[t] = in[cell(t)] 的 value 列 + 闭式 cell-id 列
     let mut lookup_cols = vec![Vec::with_capacity(t_len); 2];
     for t in 0..t_len {
-        let c = score_window_source_cell(t, w, q, s);
+        let c = score_window_source_cell(t, w, q, s, s_unpadded);
         lookup_cols[0].push(scores_flat[c]);
         lookup_cols[1].push(F::from(c as u64));
     }
 
     // 表侧：全部 cell 的 value 列 + cell-id 列 + 闭式重数
-    let multiplicities_raw = score_window_multiplicities(w, q, s, heads);
+    let multiplicities_raw = score_window_multiplicities(w, q, s, s_unpadded, heads);
     let mut table_cols = vec![Vec::with_capacity(cells); 2];
     for c in 0..cells {
         table_cols[0].push(scores_flat[c]);
@@ -305,12 +311,12 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         let t_len = heads * q * w;
         let idx_claim = claim_l.output_claims().get(1).unwrap();
         let index_col: Vec<Fr> = (0..t_len)
-            .map(|t| Fr::from(score_window_source_cell(t, w, q, s) as u64))
+            .map(|t| Fr::from(score_window_source_cell(t, w, q, s, s) as u64))
             .collect();
         let expected = index_col.into_mle().evaluate(idx_claim.point())?;
         ensure!(expected == idx_claim.evaluation(), "lookup index mismatch");
         let mult_claim = claim_t.output_claims().first().unwrap();
-        let mult_col: Vec<Fr> = score_window_multiplicities(w, q, s, heads)
+        let mult_col: Vec<Fr> = score_window_multiplicities(w, q, s, s, heads)
             .into_iter()
             .map(Fr::from)
             .collect();
@@ -368,7 +374,7 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
     #[test]
     fn test_score_window_multiplicity_invariant() {
         let (q, s, w, heads) = (16usize, 16usize, 4usize, 2usize);
-        let mult = score_window_multiplicities(w, q, s, heads);
+        let mult = score_window_multiplicities(w, q, s, s, heads);
         assert_eq!(mult.len(), heads * q * s);
         let total: u64 = mult.iter().sum();
         assert_eq!(total as usize, heads * q * w);
@@ -394,7 +400,7 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         let _: Fr = t_verify.challenge_scalar();
         let _: Fr = t_verify.challenge_scalar();
 
-        let (lookup_input, table_input) = build_gather_logup_inputs(&k, w, 1, cc, csc)?;
+        let (lookup_input, table_input) = build_gather_logup_inputs(&k, w, 1, s, cc, csc)?;
 
         // 两个同型 GKR：Lookup 侧与 Table 侧分别证明
         let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
@@ -441,7 +447,7 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         let _: Fr = t_verify.challenge_scalar();
         let _: Fr = t_verify.challenge_scalar();
 
-        let (lookup_input, table_input) = build_gather_logup_inputs(&k, w, heads, cc, csc)?;
+        let (lookup_input, table_input) = build_gather_logup_inputs(&k, w, heads, s, cc, csc)?;
 
         let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
         let proof_t = new_batch_multiple_sizes_prove(&[table_input], &mut t_prove)?;
@@ -465,7 +471,7 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
 
         // 直接校验 head 1 的首个输出行取自 head 1 的行（head 相对映射）
         let t_head1_first = s * w; // head 1 的 t=0（i=0, off=0）
-        let j = gather_source_row(t_head1_first, w, s);
+        let j = gather_source_row(t_head1_first, w, s, s);
         assert!(
             (s..rows).contains(&j),
             "head 1 first output row must source within head 1, got row {j}"
@@ -491,7 +497,7 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         let _: Fr = t_verify.challenge_scalar();
 
         // Corrupt the lookup side: flip one gathered value
-        let (mut lookup_input, table_input) = build_gather_logup_inputs(&k, w, 1, cc, csc).unwrap();
+        let (mut lookup_input, table_input) = build_gather_logup_inputs(&k, w, 1, s, cc, csc).unwrap();
         let corrupted = match &mut lookup_input {
             LogUpInput::Lookup { column_evals, .. } => {
                 column_evals[0][0] += Fr::from(1u64);
@@ -569,14 +575,18 @@ impl GatherRows {
                     2 => (1, shape.dim(0), shape.dim(1)),
                     _ => (shape.dim(0), shape.dim(1), shape.dim(2)),
                 };
-                let mut flat = Vec::with_capacity(heads * s * w * dk);
+                // padded 网格：行数 pad 到 2 的幂，padded 行零填充（源张量为
+                // einsum 输出，零填充约定；claim 链的 padding 修正语义锚定它）
+                let s_pad = s.next_power_of_two();
+                let mut flat = vec![F::ZERO; heads * s_pad * w * dk];
                 for h in 0..heads {
                     for i in 0..s {
                         for off in 0..w {
-                            let t = h * s * w + i * w + off;
-                            let j = gather_source_row(t, w, s);
+                            let t = h * s_pad * w + i * w + off;
+                            let j = gather_source_row(t, w, s_pad, s);
                             for d in 0..dk {
-                                flat.push(F::from(data[j * dk + d]));
+                                flat[(h * s_pad * w + i * w + off) * dk + d] =
+                                    F::from(data[j * dk + d]);
                             }
                         }
                     }
@@ -593,13 +603,25 @@ impl GatherRows {
                     3 => (shape.dim(0), shape.dim(1), shape.dim(2)),
                     _ => (shape.dim(0) * shape.dim(1), shape.dim(2), shape.dim(3)),
                 };
-                let mut flat = Vec::with_capacity(heads * q * w);
+                // padded 网格：q/s pad 到 2 的幂，padded 行/列零填充（与源张量
+                // 的 einsum 零填充约定一致，claim 链的 padding 修正语义锚定它）
+                let q_pad = q.next_power_of_two();
+                let s_pad = s.next_power_of_two();
+                let mut flat = Vec::with_capacity(heads * q_pad * w);
                 for h in 0..heads {
-                    for i in 0..q {
+                    for i in 0..q_pad {
                         for off in 0..w {
-                            let t = h * q * w + i * w + off;
-                            let c = score_window_source_cell(t, w, q, s);
-                            flat.push(F::from(data[c]));
+                            let t = h * q_pad * w + i * w + off;
+                            if i < q {
+                                let c = score_window_source_cell(t, w, q_pad, s_pad, s);
+                                if c < data.len() {
+                                    flat.push(F::from(data[c]));
+                                } else {
+                                    flat.push(F::ZERO);
+                                }
+                            } else {
+                                flat.push(F::ZERO);
+                            }
                         }
                     }
                 }
@@ -678,9 +700,9 @@ impl GatherRowsCtx {
             2 => (1, shape.dim(0), shape.dim(1)),
             _ => (shape.dim(0), shape.dim(1), shape.dim(2)),
         };
-        ensure!(s.is_power_of_two(), "gather sequence length must be padded");
+        let s_pad = s.next_power_of_two();
         ensure!(w.is_power_of_two(), "gather window must be a power of two");
-        let t_len = heads * s * w;
+        let t_len = heads * s_pad * w;
 
         // 1) The challenges (sampled at this point; the verifier mirrors)
         let constant_challenge: F = prover.transcript.append_and_sample(b"gather_cc");
@@ -708,13 +730,26 @@ impl GatherRowsCtx {
             t_len * dk
         );
 
-        let k_field: Vec<Vec<F>> = (0..heads * s)
-            .map(|r| (0..dk).map(|d| F::from(input.data()[r * dk + d])).collect())
+        // 源行按 padded grid 展开（padded 行零填充）
+        let rows_pad = heads * s_pad;
+        let k_field: Vec<Vec<F>> = (0..rows_pad)
+            .map(|r| {
+                (0..dk)
+                    .map(|d| {
+                        if r < heads * s {
+                            F::from(input.data()[r * dk + d])
+                        } else {
+                            F::ZERO
+                        }
+                    })
+                    .collect()
+            })
             .collect();
         let (lookup_input, table_input) = build_gather_logup_inputs(
             &k_field,
             w,
             heads,
+            s,
             constant_challenge,
             column_separation_challenge,
         )?;
@@ -725,7 +760,14 @@ impl GatherRowsCtx {
 
         // 3) The claims at the logup point + the fraction balance
         let n_lookup = num_vars_of(t_len) - 1;
-        let n_table = num_vars_of(heads * s) - 1;
+        let n_table = num_vars_of(rows_pad) - 1;
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!(
+            "[alpha-shape] Rows gkr: node={id} t_len={t_len} rows_pad={} dk={dk} n_l={n_lookup} n_t={n_table} lookup_circuits={:?} table_circuits={:?}",
+            heads * s_pad,
+            logup_proof_lookup.circuit_outputs().len(),
+            logup_proof_table.circuit_outputs().len(),
+        );
         let inst_l = LogUpVerifierInstance::new(
             constant_challenge,
             column_separation_challenge,
@@ -740,16 +782,22 @@ impl GatherRowsCtx {
             ProofType::Table,
             n_table,
         );
-        let claim_l = new_verify_logup_proof_multiple_sizes(
+        let claim_l = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_lookup,
             &[inst_l],
             prover.transcript,
-        )?;
-        let claim_t = new_verify_logup_proof_multiple_sizes(
+        ) {
+            Ok(c) => c,
+            Err(e) => anyhow::bail!("rows lookup gkr verify node {id}: {e:#}"),
+        };
+        let claim_t = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_table,
             &[inst_t],
             prover.transcript,
-        )?;
+        ) {
+            Ok(c) => c,
+            Err(e) => anyhow::bail!("rows table gkr verify node {id}: {e:#}"),
+        };
         ensure!(
             fraction_balanced(&claim_l, &claim_t),
             "gather fraction balance broken at node {id}"
@@ -802,7 +850,7 @@ impl GatherRowsCtx {
                 .get(dk)
                 .ok_or_else(|| anyhow::anyhow!("missing lookup index claim"))?;
             let index_col: Vec<F> = (0..t_len)
-                .map(|t| F::from(gather_source_row(t, w, s) as u64))
+                .map(|t| F::from(gather_source_row(t, w, s_pad, s) as u64))
                 .collect();
             let expected = index_col.into_mle().evaluate(idx_claim.point())?;
             ensure!(
@@ -814,7 +862,7 @@ impl GatherRowsCtx {
                 .output_claims()
                 .get(dk + 1)
                 .ok_or_else(|| anyhow::anyhow!("missing table index claim"))?;
-            let table_index: Vec<F> = (0..heads * s).map(|r| F::from(r as u64)).collect();
+            let table_index: Vec<F> = (0..rows_pad).map(|r| F::from(r as u64)).collect();
             let expected_t = table_index.into_mle().evaluate(idx_claim_t.point())?;
             ensure!(
                 expected_t == idx_claim_t.evaluation(),
@@ -825,7 +873,7 @@ impl GatherRowsCtx {
                 .output_claims()
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("missing table multiplicity claim"))?;
-            let mult_col: Vec<F> = gather_multiplicities_rows(w, s, heads)
+            let mult_col: Vec<F> = gather_multiplicities_rows(w, s_pad, s, heads)
                 .into_iter()
                 .map(F::from)
                 .collect();
@@ -876,9 +924,11 @@ impl GatherRowsCtx {
             3 => (shape.dim(0), shape.dim(1), shape.dim(2)),
             _ => (shape.dim(0) * shape.dim(1), shape.dim(2), shape.dim(3)),
         };
-        ensure!(q.is_power_of_two() && s.is_power_of_two(), "score axes must be padded");
-        let t_len = heads * q * w;
-        let cells = heads * q * s;
+        // padded 网格：q/s pad 到 2 的幂；clamp 用 unpadded s（score_window_source_cell）
+        let q_pad = q.next_power_of_two();
+        let s_pad = s.next_power_of_two();
+        let t_len = heads * q_pad * w;
+        let cells = heads * q_pad * s_pad;
 
         // 1) challenges
         let constant_challenge: F = prover.transcript.append_and_sample(b"gather_cc");
@@ -903,14 +953,22 @@ impl GatherRowsCtx {
             k_prime_evals.len(),
             t_len
         );
+        // 源张量按 padded grid 展开（padded 行/列零填充）
         let data = input.data();
-        let scores_flat: Vec<F> = data.iter().map(|x| F::from(*x)).collect();
+        let mut scores_flat = vec![F::ZERO; heads * q_pad * s_pad];
+        for h in 0..heads {
+            for i in 0..q {
+                for j in 0..s {
+                    scores_flat[h * q_pad * s_pad + i * s_pad + j] = F::from(data[h * q * s + i * s + j]);
+                }
+            }
+        }
 
         let (lookup_input, table_input) = build_score_window_logup_inputs(
             &scores_flat,
             w,
-            q,
-            s,
+            q_pad,
+            s_pad,
             heads,
             constant_challenge,
             column_separation_challenge,
@@ -921,6 +979,14 @@ impl GatherRowsCtx {
             new_batch_multiple_sizes_prove(&[table_input], prover.transcript)?;
 
         // 3) claims at the logup points + fraction balance
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!(
+            "[alpha-shape] SW gkr: node={id} t_len={t_len} cells={cells} n_l={} n_t={} lookup_cols_len={:?} table_cols_len={:?}",
+            num_vars_of(t_len) - 1,
+            num_vars_of(cells) - 1,
+            logup_proof_lookup.circuit_outputs().len(),
+            logup_proof_table.circuit_outputs().len(),
+        );
         let inst_l = LogUpVerifierInstance::new(
             constant_challenge,
             column_separation_challenge,
@@ -935,20 +1001,22 @@ impl GatherRowsCtx {
             ProofType::Table,
             num_vars_of(cells) - 1,
         );
-        let claim_l = new_verify_logup_proof_multiple_sizes(
+        let claim_l = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_lookup,
             &[inst_l],
             prover.transcript,
-        )?;
-        let claim_t = new_verify_logup_proof_multiple_sizes(
+        ) {
+            Ok(c) => c,
+            Err(e) => anyhow::bail!("score window lookup gkr verify node {id}: {e:#}"),
+        };
+        let claim_t = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_table,
             &[inst_t],
             prover.transcript,
-        )?;
-        ensure!(
-            fraction_balanced(&claim_l, &claim_t),
-            "score window fraction balance broken at node {id}"
-        );
+        ) {
+            Ok(c) => c,
+            Err(e) => anyhow::bail!("score window table gkr verify node {id}: {e:#}"),
+        };
 
         // 4) claims wiring：value claim 直接落在 gathered poly 的全部变量上；
         //    claim 布局：lookup = [value, index]，table = [multiplicity, value, index]。
@@ -970,7 +1038,7 @@ impl GatherRowsCtx {
                 .get(1)
                 .ok_or_else(|| anyhow::anyhow!("missing lookup index claim"))?;
             let index_col: Vec<F> = (0..t_len)
-                .map(|t| F::from(score_window_source_cell(t, w, q, s) as u64))
+                .map(|t| F::from(score_window_source_cell(t, w, q_pad, s_pad, s) as u64))
                 .collect();
             let expected = index_col.into_mle().evaluate(idx_claim.point())?;
             ensure!(
@@ -982,7 +1050,7 @@ impl GatherRowsCtx {
                 .output_claims()
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("missing table multiplicity claim"))?;
-            let mult_col: Vec<F> = score_window_multiplicities(w, q, s, heads)
+            let mult_col: Vec<F> = score_window_multiplicities(w, q_pad, s_pad, s, heads)
                 .into_iter()
                 .map(F::from)
                 .collect();
@@ -1061,6 +1129,9 @@ impl GatherRowsCtx {
                 unpadded_input_shape.dim(2),
             ),
         };
+        let s_pad = s.next_power_of_two();
+        let rows_pad = heads * s_pad;
+        let t_len = heads * s_pad * w;
 
         // 1) The challenges (mirroring the prover's sampling)
         let constant_challenge: F = verifier.transcript.append_and_sample(b"gather_cc");
@@ -1068,8 +1139,8 @@ impl GatherRowsCtx {
             verifier.transcript.append_and_sample(b"gather_csc");
 
         // 2) The claims at the logup point + the fraction balance
-        let n_lookup = num_vars_of(heads * s * w) - 1;
-        let n_table = num_vars_of(heads * s) - 1;
+        let n_lookup = num_vars_of(t_len) - 1;
+        let n_table = num_vars_of(rows_pad) - 1;
         let inst_l = LogUpVerifierInstance::new(
             constant_challenge,
             column_separation_challenge,
@@ -1129,13 +1200,12 @@ impl GatherRowsCtx {
 
         // 3b) index/重数列 claim 对照闭式重算（与 prove 侧一致）
         {
-            let t_len = heads * s * w;
             let idx_claim = claim_l
                 .output_claims()
                 .get(dk)
                 .ok_or_else(|| anyhow::anyhow!("missing lookup index claim"))?;
             let index_col: Vec<F> = (0..t_len)
-                .map(|t| F::from(gather_source_row(t, w, s) as u64))
+                .map(|t| F::from(gather_source_row(t, w, s_pad, s) as u64))
                 .collect();
             let expected = index_col.into_mle().evaluate(idx_claim.point())?;
             ensure!(
@@ -1157,7 +1227,7 @@ impl GatherRowsCtx {
                 .output_claims()
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("missing table multiplicity claim"))?;
-            let mult_col: Vec<F> = gather_multiplicities_rows(w, s, heads)
+            let mult_col: Vec<F> = gather_multiplicities_rows(w, s_pad, s, heads)
                 .into_iter()
                 .map(F::from)
                 .collect();
@@ -1217,8 +1287,10 @@ impl GatherRowsCtx {
                 unpadded_input_shape.dim(3),
             ),
         };
-        let t_len = heads * q * w;
-        let cells = heads * q * s;
+        let q_pad = q.next_power_of_two();
+        let s_pad = s.next_power_of_two();
+        let t_len = heads * q_pad * w;
+        let cells = heads * q_pad * s_pad;
 
         // 1) challenges
         let constant_challenge: F = verifier.transcript.append_and_sample(b"gather_cc");
@@ -1268,7 +1340,7 @@ impl GatherRowsCtx {
                 .get(1)
                 .ok_or_else(|| anyhow::anyhow!("missing lookup index claim"))?;
             let index_col: Vec<F> = (0..t_len)
-                .map(|t| F::from(score_window_source_cell(t, w, q, s) as u64))
+                .map(|t| F::from(score_window_source_cell(t, w, q_pad, s_pad, s) as u64))
                 .collect();
             let expected = index_col.into_mle().evaluate(idx_claim.point())?;
             ensure!(
@@ -1279,7 +1351,7 @@ impl GatherRowsCtx {
                 .output_claims()
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("missing table multiplicity claim"))?;
-            let mult_col: Vec<F> = score_window_multiplicities(w, q, s, heads)
+            let mult_col: Vec<F> = score_window_multiplicities(w, q_pad, s_pad, s, heads)
                 .into_iter()
                 .map(F::from)
                 .collect();

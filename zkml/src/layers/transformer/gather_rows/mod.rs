@@ -112,19 +112,19 @@ pub(crate) fn gather_source_index(t: usize, w: usize, s: usize) -> usize {
     j_i64.clamp(0, s as i64 - 1) as usize
 }
 
-/// Source row index for the flattened `[Hkv·s·w]` output row `t` over the
-/// flattened `[Hkv·s]` input rows (row-major `[Hkv, s, dk]` view of K/V).
-/// The window map is head-relative: every head repeats the same
-/// `i → clamp(i-(w-1)+off)` gather over its own `s` rows.
+/// Source row index for the flattened `[Hkv·s_pad·w]` output row `t` over the
+/// flattened `[Hkv·s_pad]` input rows (row-major `[Hkv, s_pad, dk]` view of the
+/// zero-padded K/V). The window map is head-relative and clamps to the
+/// UNPADDED row count `s`（padded 源行零填充且永不读取）。
 #[inline]
-pub(crate) fn gather_source_row(t: usize, w: usize, s: usize) -> usize {
-    let per_head_out = s * w;
+pub(crate) fn gather_source_row(t: usize, w: usize, s_pad: usize, s_unpadded: usize) -> usize {
+    let per_head_out = s_pad * w;
     let head = t / per_head_out;
     let i = (t % per_head_out) / w;
     let off = t % w;
     let j_i64 = i as i64 - (w as i64 - 1) + off as i64;
-    let j = j_i64.clamp(0, s as i64 - 1) as usize;
-    head * s + j
+    let j = j_i64.clamp(0, s_unpadded as i64 - 1) as usize;
+    head * s_pad + j
 }
 
 /// Whether the window position `t` is valid (its source index is inside the
@@ -150,41 +150,72 @@ pub(crate) fn gather_multiplicities(w: usize, s: usize) -> Vec<u64> {
     mult
 }
 
-/// The head-tiled multiplicity histogram over the flattened `[Hkv·s]` input
-/// rows: every head repeats the same per-head histogram.
-pub(crate) fn gather_multiplicities_rows(w: usize, s: usize, heads: usize) -> Vec<u64> {
-    let per_head = gather_multiplicities(w, s);
-    let mut mult = Vec::with_capacity(per_head.len() * heads);
+/// The head-tiled multiplicity histogram over the flattened `[Hkv·s_pad]`
+/// padded input rows（clamp 到 unpadded s——padded 源行零填充且重数为 0）.
+pub(crate) fn gather_multiplicities_rows(
+    w: usize,
+    s_pad: usize,
+    s_unpadded: usize,
+    heads: usize,
+) -> Vec<u64> {
+    let per_head = {
+        let mut mult = vec![0u64; s_pad];
+        for t in 0..s_pad * w {
+            let i = t / w;
+            let off = t % w;
+            let j_i64 = i as i64 - (w as i64 - 1) + off as i64;
+            let j = j_i64.clamp(0, s_unpadded as i64 - 1) as usize;
+            mult[j] += 1;
+        }
+        mult
+    };
+    let mut out = Vec::with_capacity(per_head.len() * heads);
     for _ in 0..heads {
-        mult.extend_from_slice(&per_head);
+        out.extend_from_slice(&per_head);
     }
-    mult
+    out
 }
 
 /// Source cell index for the ScoreWindow variant: for the flattened
-/// `[L·q·w]` output position `t`（行主序 `[L, q, w]`，L = 前导轴折叠），
-/// 返回输入 `[L, q, s]` 行主序 cell id `l·(q·s) + i·s + j(i,off)`，
-/// 其中 `j(i,off) = clamp(i-(w-1)+off, 0, s-1)` —— 与行收集同一闭式映射，
-/// 只是作用在最后一轴（key 轴）上。
+/// `[L·q_pad·w]` output position `t`（行主序 `[L, q_pad, w]`，L = 前导轴折叠），
+/// 返回输入 `[L, q_pad, s_pad]` 行主序 cell id `l·(q_pad·s_pad) + i·s_pad + j`，
+/// 其中 `j = clamp(i-(w-1)+off, 0, s_unpadded-1)`。
+///
+/// 网格 = padded（q_pad/s_pad 为 2 的幂），clamp 用 unpadded s：padded 源
+/// 行/列（零填充）只会在 padded 输出行被读到，其值恒为 0——与 einsum 的
+/// 零填充约定一致，也符合 claim 链的 padding 修正语义（修正后的 claim =
+/// 零填充 MLE 的求值）。
 #[inline]
-pub(crate) fn score_window_source_cell(t: usize, w: usize, q: usize, s: usize) -> usize {
-    let per_head_out = q * w;
+pub(crate) fn score_window_source_cell(
+    t: usize,
+    w: usize,
+    q_pad: usize,
+    s_pad: usize,
+    s_unpadded: usize,
+) -> usize {
+    let per_head_out = q_pad * w;
     let head = t / per_head_out;
     let i = (t % per_head_out) / w;
     let off = t % w;
     let j_i64 = i as i64 - (w as i64 - 1) + off as i64;
-    let j = j_i64.clamp(0, s as i64 - 1) as usize;
-    head * (q * s) + i * s + j
+    let j = j_i64.clamp(0, s_unpadded as i64 - 1) as usize;
+    head * (q_pad * s_pad) + i * s_pad + j
 }
 
 /// ScoreWindow 的 cell 重数直方图（数据无关闭式）：输出位置 t 复制输入
-/// cell `score_window_source_cell(t)`，对 `[L·q·s]` 个 cell 计数。
+/// cell `score_window_source_cell(t)`，对 `[L·q_pad·s_pad]` 个 cell 计数。
 ///
-/// 不变量：Σ mult = L·q·w（每个输出 cell 恰好复制一个输入 cell）。
-pub(crate) fn score_window_multiplicities(w: usize, q: usize, s: usize, heads: usize) -> Vec<u64> {
-    let mut mult = vec![0u64; heads * q * s];
-    for t in 0..heads * q * w {
-        mult[score_window_source_cell(t, w, q, s)] += 1;
+/// 不变量：Σ mult = L·q_pad·w（每个输出 cell 恰好复制一个输入 cell）。
+pub(crate) fn score_window_multiplicities(
+    w: usize,
+    q_pad: usize,
+    s_pad: usize,
+    s_unpadded: usize,
+    heads: usize,
+) -> Vec<u64> {
+    let mut mult = vec![0u64; heads * q_pad * s_pad];
+    for t in 0..heads * q_pad * w {
+        mult[score_window_source_cell(t, w, q_pad, s_pad, s_unpadded)] += 1;
     }
     mult
 }

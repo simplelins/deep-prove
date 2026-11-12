@@ -49,6 +49,24 @@ impl LookupInputConfig {
         batching_challenges.insert(0, sum_challenge);
         batching_challenges.extend(other_challenges);
         #[cfg(feature = "p1-debug")]
+        {
+            // P1 claim 来源探针：last_claim 的点长 + 评估值哈希（跨轮对比——
+            // 张量已证明稳定，若 witness 稳定而 claim 逐轮不一致 → claim 链问题）
+            let claim_point_len = last_claim.point().len();
+            let claim_eval = last_claim.evaluation();
+            let mut ch: u64 = 0xcbf2_9ce4_8422_2325;
+            for x in last_claim.point() {
+                ch ^= (*x).into_bigint().as_ref().iter().fold(0u64, |a, b| a ^ (b & 0xffff));
+                ch = ch.wrapping_mul(0x100000001b3);
+            }
+            ch ^= claim_eval.into_bigint().as_ref().iter().fold(0u64, |a, b| a ^ (b & 0xffff));
+            ch = ch.wrapping_mul(0x100000001b3);
+            eprintln!(
+                "[p1-claim-src] node={node_id} point_len={claim_point_len} eval_hash={ch:#x} eval={:?}",
+                claim_eval.into_bigint()
+            );
+        }
+        #[cfg(feature = "p1-debug")]
         eprintln!(
             "[p1-linking] PROVE node={node_id} claim={:?} sum_ch={:?} other_ch={:?} mles={} lens={:?} logup_point0={:?}",
             last_claim.evaluation().into_bigint(),
@@ -311,9 +329,23 @@ mod test_utils {
                 total_sum += chunk_sum_part * batching_challenges[0];
             }
             if total_output != last_claim.evaluation() {
+                // P1：witness 输出列指纹（跨轮对比——稳定 = claim 链问题）
+                let wit_hash = mles
+                    .first()
+                    .map(|m| {
+                        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                        for x in m.evals() {
+                            h ^= x.into_bigint().as_ref().iter().fold(0u64, |a, b| a ^ (b & 0xffff));
+                            h = h.wrapping_mul(0x100000001b3);
+                        }
+                        h
+                    })
+                    .unwrap_or(0);
                 println!(
-                    "Output evaluation does not match last claim evaluation!, table: {}",
+                    "Output evaluation does not match last claim evaluation!, table: {} witness_mle0_hash={wit_hash:#x} witness_len={} claim_point_len={}",
                     chunking_info.table().name(),
+                    mles.first().map(|m| m.len()).unwrap_or(0),
+                    last_claim.point().len(),
                 );
                 println!(
                     "Unpadded input shape: {:?}, number of zero chunks: {}",
