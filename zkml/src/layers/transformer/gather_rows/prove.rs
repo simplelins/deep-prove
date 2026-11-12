@@ -370,6 +370,87 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         );
     }
 
+    /// e2e 精确几何复现：s_pad=1024, w=512（512× 折叠比 = 窗口大小），dk=3。
+    #[test]
+    fn test_gather_logup_round_trip_e2e_geometry() -> Result<()> {
+        let (heads, s, w, dk) = (1usize, 1024usize, 512usize, 3usize);
+        let rows = heads * s;
+        let mut rng = ark_std::test_rng();
+        let k: Vec<Vec<Fr>> = (0..rows)
+            .map(|_| (0..dk).map(|_| Fr::rand(&mut rng)).collect())
+            .collect();
+
+        let mut t_prove = Blake3Transcript::new(b"gather_e2egeo");
+        let mut t_verify = Blake3Transcript::new(b"gather_e2egeo");
+        let cc: Fr = t_prove.challenge_scalar();
+        let csc: Fr = t_prove.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+
+        let (lookup_input, table_input) =
+            build_gather_logup_inputs(&k, w, heads, s, cc, csc)?;
+        let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
+        let proof_t = new_batch_multiple_sizes_prove(&[table_input], &mut t_prove)?;
+
+        let instances = build_gather_verifier_instances(w, rows, dk, cc, csc)?;
+        let claim_l = new_verify_logup_proof_multiple_sizes(
+            &proof_l,
+            &instances[..1],
+            &mut t_verify,
+        )?;
+        let claim_t = new_verify_logup_proof_multiple_sizes(
+            &proof_t,
+            &instances[1..],
+            &mut t_verify,
+        )?;
+        ensure!(
+            fraction_balanced(&claim_l, &claim_t),
+            "e2e-geometry gather fraction balance broken"
+        );
+        Ok(())
+    }
+
+    /// e2e 复现实验：dk=256（257 列 tuple）+ 大尺寸比（rows_pad=2^6,
+    /// t_len=2^11, 32× 折叠）——隔离 multi-size 折叠与多列 tuple 的交互。
+    #[test]
+    fn test_gather_logup_round_trip_wide_dk_big_ratio() -> Result<()> {
+        let (heads, s, w, dk) = (1usize, 64usize, 32usize, 256usize);
+        let rows = heads * s;
+        let mut rng = ark_std::test_rng();
+        let k: Vec<Vec<Fr>> = (0..rows)
+            .map(|_| (0..dk).map(|_| Fr::rand(&mut rng)).collect())
+            .collect();
+
+        let mut t_prove = Blake3Transcript::new(b"gather_wide");
+        let mut t_verify = Blake3Transcript::new(b"gather_wide");
+        let cc: Fr = t_prove.challenge_scalar();
+        let csc: Fr = t_prove.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+
+        let (lookup_input, table_input) =
+            build_gather_logup_inputs(&k, w, heads, s, cc, csc)?;
+        let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
+        let proof_t = new_batch_multiple_sizes_prove(&[table_input], &mut t_prove)?;
+
+        let instances = build_gather_verifier_instances(w, rows, dk, cc, csc)?;
+        let claim_l = new_verify_logup_proof_multiple_sizes(
+            &proof_l,
+            &instances[..1],
+            &mut t_verify,
+        )?;
+        let claim_t = new_verify_logup_proof_multiple_sizes(
+            &proof_t,
+            &instances[1..],
+            &mut t_verify,
+        )?;
+        ensure!(
+            fraction_balanced(&claim_l, &claim_t),
+            "wide-dk big-ratio gather fraction balance broken"
+        );
+        Ok(())
+    }
+
     /// 重数不变量：Σ mult = heads·q·w（每个输出 cell 恰好复制一个输入 cell）。
     #[test]
     fn test_score_window_multiplicity_invariant() {
