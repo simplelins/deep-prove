@@ -232,10 +232,22 @@ impl QuantizeOp for AttentionMask<f32> {
             .first()
             .map(|sf| sf.domain().0)
             .expect("We have ensured there is at least one scaling factor");
-        let AttentionMask { span, .. } = self;
+        // banded_window 必须保留（D1.1 方案 α 的角掩码靠它识别窗口位）——
+        // 量化重建时丢弃会让角掩码退化为标准 Local 掩码，在 [.., q, w] 输入上
+        // 以 seq_len=w 走 non_caching 分支而 expand 失败。
+        let AttentionMask {
+            span,
+            banded_window,
+            ..
+        } = self;
 
-        let quantised_mask =
-            AttentionMask::<Element>::new(quantized_negative_infinity).with_span(span)?;
+        let quantised_mask = {
+            let m = AttentionMask::<Element>::new(quantized_negative_infinity).with_span(span)?;
+            match banded_window {
+                Some(w) => m.with_banded_window(w),
+                None => m,
+            }
+        };
 
         Ok(QuantizeOutput::new(quantised_mask, input_scaling.to_vec()))
     }

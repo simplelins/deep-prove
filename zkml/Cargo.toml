@@ -24,6 +24,8 @@ path = "src/bin/extract_logits.rs"
 [features]
 default = ["cpu"]
 p1-debug = []
+# α 接线调试：打印 gather/角掩码的形状（临时，e2e 调试用）
+alpha-debug-shapes = []
 # Capture layers' quatization outputs for regression tests
 capture-layers-quant = []
 cpu = ["burn/ndarray", "dep:burn-ndarray"]

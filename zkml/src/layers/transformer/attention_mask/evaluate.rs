@@ -16,6 +16,13 @@ where
         let input = input.clone();
 
         let seq_len = input.dim(-1)?;
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!(
+            "[alpha-shape] mask enter: span={:?} banded={:?} input_shape={:?} unpadded={unpadded_shape:?} seq_len={seq_len}",
+            self.span,
+            self.banded_window,
+            input.shape()
+        );
         // // input of shape [..., num_heads, q_len, seq_len]
         // // if q_len == 1, we're in the caching inference case. Otherwise
         // // we're in the regular square matrix case where q_len == seq_len
@@ -25,6 +32,11 @@ where
         // D1.1 Stage A：带状分数的角掩码——输入 [.., q, w]（Rank3 或 GQA Rank4），
         // 掩 q+off < w-1 的无效位（与 GatherRows 的 clamp 语义一致）
         if let Some(bw) = self.banded_window {
+            #[cfg(feature = "alpha-debug-shapes")]
+            eprintln!(
+                "[alpha-shape] corner mask: input_shape={:?} unpadded={unpadded_shape:?} bw={bw}",
+                input.shape()
+            );
             let q = unpadded_shape.dims[unpadded_shape.num_dims() - 2];
             let mask_data: Vec<bool> = (0..q * bw)
                 .map(|t| {

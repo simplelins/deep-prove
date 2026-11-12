@@ -59,6 +59,11 @@ impl GatherRows {
             _ => bail!("ScoreWindow expects a rank-3/4 score tensor"),
         };
         let [l, q, s] = in3.dims();
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!(
+            "[alpha-shape] score window: rank4={rank4} in_dims={:?} in_unpadded={unpadded_dims:?} l={l} q={q} s={s} w={w}",
+            inputs[0].shape()
+        );
 
         // 闭式索引 [q, w]（i64），扩展到 [L, q, w]
         let idx_vec: Vec<i64> = (0..q * w)
@@ -85,6 +90,8 @@ impl GatherRows {
             let _ = last;
         }
 
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!("[alpha-shape] score window out: gathered={:?} out_unpadded={out_unpadded:?}", gathered.shape());
         let out = if let Some((d0, d1)) = lead {
             WrappedTensor::Rank4 {
                 tensor: gathered.reshape([d0, d1, q, w]),
@@ -109,12 +116,40 @@ impl GatherRows {
         inputs: &[&WrappedTensor<T>],
     ) -> Result<WrappedTensor<T>> {
         let w = self.window();
+        // Rank2 [s, dk]（MQA 的 V）→ 输出 Rank3 [s, w, dk]；Rank3 → Rank4
+        if let WrappedTensor::Rank2 { tensor, unpadded_shape } = inputs[0] {
+            let [s_rows, dk] = tensor.dims();
+            let device = tensor.device();
+            let mut bands = Vec::with_capacity(w);
+            for off in 0..w {
+                let delta = w - 1 - off;
+                let k_shift: BTensor<Backend, 2, T::Kind> = if delta == 0 {
+                    tensor.clone()
+                } else if delta >= s_rows {
+                    let first = tensor.clone().slice([0..1, 0..dk]);
+                    first.repeat(&[s_rows, 1])
+                } else {
+                    let rows = s_rows - delta;
+                    let first = tensor.clone().slice([0..1, 0..dk]).repeat(&[delta, 1]);
+                    let kept = tensor.clone().slice([0..rows, 0..dk]);
+                    BTensor::cat(vec![first, kept], 0)
+                };
+                bands.push(k_shift.reshape([s_rows, 1, dk]));
+            }
+            let gathered = BTensor::cat(bands, 1); // [s, w, dk]
+            let mut out_unpadded = unpadded_shape.dims.clone();
+            out_unpadded.insert(1, w);
+            return Ok(WrappedTensor::Rank3 {
+                tensor: gathered,
+                unpadded_shape: burn::prelude::Shape::from(out_unpadded),
+            });
+        }
         let (k, unpadded_shape) = match inputs[0] {
             WrappedTensor::Rank3 {
                 tensor,
                 unpadded_shape,
             } => (tensor, unpadded_shape),
-            _ => bail!("GatherRows expects a rank-3 K input"),
+            _ => bail!("GatherRows expects a rank-2/3 K/V input"),
         };
         let [hkv, s, dk] = k.dims();
 

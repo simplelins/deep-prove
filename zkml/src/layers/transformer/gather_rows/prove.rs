@@ -530,7 +530,25 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
 impl GatherRows {
     fn output_shape(&self, input: &Shape) -> Shape {
         let w = self.window();
-        Shape::new(vec![input.dim(0), input.dim(1), w, input.dim(2)])
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!("[alpha-shape] LAYER output_shape: mode={:?} input={input:?} rank={}", self.mode, input.rank());
+        match self.mode {
+            GatherMode::Rows => {
+                // rank-2 [s, dk]（MQA 的 V）→ [s, w, dk]；rank-3 [Hkv, s, dk] → [Hkv, s, w, dk]
+                if input.rank() == 2 {
+                    Shape::new(vec![input.dim(0), w, input.dim(1)])
+                } else {
+                    Shape::new(vec![input.dim(0), input.dim(1), w, input.dim(2)])
+                }
+            }
+            GatherMode::ScoreWindow => {
+                // 末轴（key 轴）s → w，秩不变
+                let mut dims: Vec<usize> = input.iter().copied().collect();
+                let n = dims.len();
+                dims[n - 1] = w;
+                Shape::new(dims)
+            }
+        }
     }
 
     /// The gathered tensor's flattened field MLE.
@@ -543,13 +561,14 @@ impl GatherRows {
         match self.mode {
             GatherMode::Rows => {
                 ensure!(
-                    shape.rank() == 3,
-                    "gather input must be rank-3 [Hkv, s, dk], got rank {}",
+                    shape.rank() == 2 || shape.rank() == 3,
+                    "gather input must be rank-2 [s, dk] (MQA) or rank-3 [Hkv, s, dk], got rank {}",
                     shape.rank()
                 );
-                let heads = shape.dim(0);
-                let s = shape.dim(1);
-                let dk = shape.dim(2);
+                let (heads, s, dk) = match shape.rank() {
+                    2 => (1, shape.dim(0), shape.dim(1)),
+                    _ => (shape.dim(0), shape.dim(1), shape.dim(2)),
+                };
                 let mut flat = Vec::with_capacity(heads * s * w * dk);
                 for h in 0..heads {
                     for i in 0..s {
@@ -604,10 +623,17 @@ impl GatherRowsCtx {
 
     fn output_shape(&self, input: &Shape) -> Shape {
         let w = self.window();
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!("[alpha-shape] CTX output_shape: mode={:?} input={input:?} rank={}", self.mode, input.rank());
         match self.mode {
-            GatherMode::Rows => Shape::new(vec![input.dim(0), input.dim(1), w, input.dim(2)]),
+            GatherMode::Rows => {
+                if input.rank() == 2 {
+                    Shape::new(vec![input.dim(0), w, input.dim(1)])
+                } else {
+                    Shape::new(vec![input.dim(0), input.dim(1), w, input.dim(2)])
+                }
+            }
             GatherMode::ScoreWindow => {
-                // 末轴（key 轴）s → w，秩不变
                 let mut dims: Vec<usize> = input.iter().copied().collect();
                 let n = dims.len();
                 dims[n - 1] = w;
@@ -641,16 +667,17 @@ impl GatherRowsCtx {
         }
         let w = self.window();
         let input = step_data.input_tensor_at(0)?;
-        // 输入约定：Rank3 [Hkv, s, dk]（K/V 布局），行主序展平 [Hkv·s, dk]
+        // 输入约定：Rank3 [Hkv, s, dk] 或 Rank2 [s, dk]（MQA 的 V），行主序展平
         let shape = input.shape();
         ensure!(
-            shape.rank() == 3,
-            "gather input must be rank-3 [Hkv, s, dk], got rank {}",
+            shape.rank() == 2 || shape.rank() == 3,
+            "gather input must be rank-2 [s, dk] or rank-3 [Hkv, s, dk], got rank {}",
             shape.rank()
         );
-        let heads = shape.dim(0);
-        let s = shape.dim(1);
-        let dk = shape.dim(2);
+        let (heads, s, dk) = match shape.rank() {
+            2 => (1, shape.dim(0), shape.dim(1)),
+            _ => (shape.dim(0), shape.dim(1), shape.dim(2)),
+        };
         ensure!(s.is_power_of_two(), "gather sequence length must be padded");
         ensure!(w.is_power_of_two(), "gather window must be a power of two");
         let t_len = heads * s * w;
@@ -1016,15 +1043,24 @@ impl GatherRowsCtx {
         if self.mode == GatherMode::ScoreWindow {
             return self.verify_score_window(id, proof, unpadded_input_shape, last_claims, verifier);
         }
-        // 输入约定：Rank3 [Hkv, s, dk]，与 prove_gather 一致
+        // 输入约定：Rank3 [Hkv, s, dk] 或 Rank2 [s, dk]（MQA），与 prove_gather 一致
         ensure!(
-            unpadded_input_shape.rank() == 3,
-            "gather input must be rank-3 [Hkv, s, dk], got rank {}",
+            unpadded_input_shape.rank() == 2 || unpadded_input_shape.rank() == 3,
+            "gather input must be rank-2 or rank-3, got rank {}",
             unpadded_input_shape.rank()
         );
-        let heads = unpadded_input_shape.dim(0);
-        let s = unpadded_input_shape.dim(1);
-        let dk = unpadded_input_shape.dim(2);
+        let (heads, s, dk) = match unpadded_input_shape.rank() {
+            2 => (
+                1,
+                unpadded_input_shape.dim(0),
+                unpadded_input_shape.dim(1),
+            ),
+            _ => (
+                unpadded_input_shape.dim(0),
+                unpadded_input_shape.dim(1),
+                unpadded_input_shape.dim(2),
+            ),
+        };
 
         // 1) The challenges (mirroring the prover's sampling)
         let constant_challenge: F = verifier.transcript.append_and_sample(b"gather_cc");
@@ -1417,8 +1453,22 @@ impl ProveInfo for GatherRows {
 }
 
 impl PadOp for GatherRows {
-    fn pad_node(self, _si: &mut crate::padding::ShapeInfo) -> Result<Self> {
-        // 窗口 w 与位置映射数据无关，pad 不改变算子
+    fn pad_node(self, si: &mut crate::padding::ShapeInfo) -> Result<Self> {
+        // gather 改变形状（行收集 +1 维 / 窗口切片末轴），必须把输出形状写回
+        // ShapeInfo——否则下游节点（AV einsum）读到的是本节点的输入形状，
+        // padding 阶段轴检查失败（实测：AV 读到原始 V [s,d] 而非 V' [s,w,d]）。
+        let padded_outs = self.output_shapes(&si.padded_input_shapes(), PaddingMode::Padding)?;
+        let unpadded_outs =
+            self.output_shapes(&si.unpadded_input_shapes(), PaddingMode::NoPadding)?;
+        si.shapes = padded_outs
+            .into_iter()
+            .zip(unpadded_outs)
+            .map(|(p, u)| crate::padding::ShapeData {
+                input_shape_padded: p,
+                ignore_garbage_pad: None,
+                input_shape_og: u,
+            })
+            .collect();
         Ok(self)
     }
 }

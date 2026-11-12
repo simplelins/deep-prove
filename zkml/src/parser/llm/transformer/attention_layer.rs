@@ -269,6 +269,25 @@ pub trait AttentionMechanism {
                         ),
                         Some(score_gather_id),
                     )?;
+                    #[cfg(feature = "alpha-debug-shapes")]
+                    {
+                        for (nid, desc) in [
+                            (query_key_id, "qk"),
+                            (mask_id, "first_mask"),
+                            (score_gather_id, "score_gather"),
+                            (corner_mask_id, "corner_mask"),
+                        ] {
+                            let feeds: Vec<String> = model
+                                .graph()
+                                .incoming_feeds(nid)
+                                .iter()
+                                .map(|f| {
+                                    format!("N{:?}p{:?}", f.source.node_id, f.source.port)
+                                })
+                                .collect();
+                            eprintln!("[alpha-graph] {desc}({nid:?}) <- {feeds:?}");
+                        }
+                    }
                     (
                         mask_id,
                         model.add_consecutive_layer(

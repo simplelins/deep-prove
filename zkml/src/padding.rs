@@ -250,6 +250,12 @@ pub(crate) fn pad_einsum(einsum: EinSum<Element>, si: &mut ShapeInfo) -> Result<
         // Update the shape data
         let unpadded_input_shapes = si.unpadded_input_shapes();
         let padded_input_shapes = si.padded_input_shapes();
+        #[cfg(feature = "alpha-debug-shapes")]
+        if einsum.name.as_deref() == Some("attention_value_einsum") {
+            eprintln!(
+                "[alpha-shape] pad AV: unpadded_in={unpadded_input_shapes:?} padded_in={padded_input_shapes:?}"
+            );
+        }
 
         let unpadded_output_shapes =
             einsum.output_shapes(&unpadded_input_shapes, PaddingMode::NoPadding)?;
