@@ -8,7 +8,8 @@
 //! combined with the separation challenge) makes the pairing position-exact.
 
 use anyhow::{bail, ensure, Result};
-use ark_ff::PrimeField;
+use ark_ff::{PrimeField, PrimeField as _};
+use ark_std::str::FromStr;
 use dp_crypto::arkyper::CommitmentScheme;
 use dp_crypto::arkyper::transcript::{AppendToTranscript, Transcript};
 use dp_crypto::poly::dense::DensePolynomial;
@@ -368,6 +369,172 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
             !fraction_balanced(&claim_l, &claim_t),
             "corrupted score window must break the fraction balance"
         );
+    }
+
+    /// 精确尺寸复现：2^19 行 × 257 列（与 e2e V-gather 完全相同），fresh transcript。
+    #[test]
+    fn test_gather_logup_round_trip_exact_e2e_size() -> Result<()> {
+        let (heads, s, w, dk) = (1usize, 1024usize, 512usize, 256usize);
+        let rows = heads * s;
+        let mut rng = ark_std::test_rng();
+        let k: Vec<Vec<Fr>> = (0..rows)
+            .map(|_| (0..dk).map(|_| Fr::rand(&mut rng)).collect())
+            .collect();
+
+        let mut t_prove = Blake3Transcript::new(b"gather_exact");
+        let mut t_verify = Blake3Transcript::new(b"gather_exact");
+        let cc: Fr = t_prove.challenge_scalar();
+        let csc: Fr = t_prove.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+
+        let (lookup_input, table_input) =
+            build_gather_logup_inputs(&k, w, heads, s, cc, csc)?;
+        let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
+        let proof_t = new_batch_multiple_sizes_prove(&[table_input], &mut t_prove)?;
+
+        let instances = build_gather_verifier_instances(w, rows, dk, cc, csc)?;
+        let claim_l = new_verify_logup_proof_multiple_sizes(
+            &proof_l,
+            &instances[..1],
+            &mut t_verify,
+        )?;
+        let claim_t = new_verify_logup_proof_multiple_sizes(
+            &proof_t,
+            &instances[1..],
+            &mut t_verify,
+        )?;
+        ensure!(
+            fraction_balanced(&claim_l, &claim_t),
+            "exact-size gather fraction balance broken"
+        );
+        Ok(())
+    }
+
+    /// e2e 数据重放：读取 /tmp/kfield_dump.csv（真实 V 数据）跑同构造 GKR。
+    /// 数据触发 → 失败；上下文触发 → 通过。
+    #[test]
+    fn test_gather_logup_replay_e2e_kfield() -> Result<()> {
+        let path = "/tmp/kfield_dump.csv";
+        let meta = std::fs::read_to_string("/tmp/kfield_meta.txt")?;
+        // meta: heads=1 s_pad=1024 s=1023 dk=256 w=512
+        let mut parts = meta.split_whitespace();
+        let get = |k: &str| -> usize {
+            parts
+                .clone()
+                .find(|p| p.starts_with(k))
+                .and_then(|p| p.split('=').nth(1))
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        };
+        let (heads, s, dk, w) = (get("heads"), get("s"), get("dk"), get("w"));
+        ensure!(heads > 0 && s > 0 && dk > 0 && w > 0, "bad meta");
+
+        let csv = std::fs::read_to_string(path)?;
+        let k: Vec<Vec<Fr>> = csv
+            .lines()
+            .map(|line| {
+                line.split(',')
+                    .map(|v| Fr::from_str(v).expect("bad field string"))
+                    .collect()
+            })
+            .collect();
+        eprintln!("replay: rows={} dk={} w={w} heads={heads} s={s}", k.len(), k.first().map(|r| r.len()).unwrap_or(0));
+        ensure!(!k.is_empty(), "empty k_field");
+
+        let mut t_prove = Blake3Transcript::new(b"gather_replay");
+        let mut t_verify = Blake3Transcript::new(b"gather_replay");
+        // 先序状态实验：模拟 chunk 内先序节点占据的 transcript 状态
+        // （e2e 中 gather 的 prove 在同 chunk 多个 requant 的 prove 之后）
+        if let Ok(prefix_len) = std::env::var("ZKML_REPLAY_PREFIX") {
+            let n: usize = prefix_len.parse().unwrap_or(0);
+            // 模拟先序节点：append 一个 32 字节 "证明" × n（每节点若干 append）
+            for i in 0..n {
+                t_prove.append_bytes(&[i as u8; 32]);
+                t_verify.append_bytes(&[i as u8; 32]);
+            }
+            eprintln!("replay: absorbed {n} dummy prior proofs");
+        }
+        // e2e 挑战重放：meta 第二/三行 = cc/csc（mid-stream transcript 的具体值）
+        let meta_lines: Vec<String> = meta.lines().map(|l| l.to_string()).collect();
+        let cc_from_meta = meta_lines
+            .get(1)
+            .and_then(|l| l.strip_prefix("cc="))
+            .and_then(|v| Fr::from_str(v).ok());
+        let csc_from_meta = meta_lines
+            .get(2)
+            .and_then(|l| l.strip_prefix("csc="))
+            .and_then(|v| Fr::from_str(v).ok());
+        let cc: Fr = cc_from_meta.unwrap_or_else(|| t_prove.challenge_scalar());
+        let csc: Fr = csc_from_meta.unwrap_or_else(|| t_prove.challenge_scalar());
+        if cc_from_meta.is_some() {
+            eprintln!("replay: using e2e cc/csc from meta");
+        }
+        let _: Fr = t_verify.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+
+        let (lookup_input, table_input) =
+            build_gather_logup_inputs(&k, w, heads, s, cc, csc)?;
+        let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
+        let proof_t = new_batch_multiple_sizes_prove(&[table_input], &mut t_prove)?;
+
+        let instances = build_gather_verifier_instances(w, k.len(), dk, cc, csc)?;
+        let claim_l = new_verify_logup_proof_multiple_sizes(
+            &proof_l,
+            &instances[..1],
+            &mut t_verify,
+        )?;
+        let claim_t = new_verify_logup_proof_multiple_sizes(
+            &proof_t,
+            &instances[1..],
+            &mut t_verify,
+        )?;
+        ensure!(
+            fraction_balanced(&claim_l, &claim_t),
+            "replay gather fraction balance broken"
+        );
+        eprintln!("replay: GKR verify PASSED with the e2e data");
+        Ok(())
+    }
+
+    /// 组合变量隔离：dk=256 ∧ ratio=512（rows_pad=2^3, t_len=2^12，GKR 便宜）。
+    #[test]
+    fn test_gather_logup_round_trip_dk256_ratio512() -> Result<()> {
+        let (heads, s, w, dk) = (1usize, 8usize, 512usize, 256usize);
+        let rows = heads * s;
+        let mut rng = ark_std::test_rng();
+        let k: Vec<Vec<Fr>> = (0..rows)
+            .map(|_| (0..dk).map(|_| Fr::rand(&mut rng)).collect())
+            .collect();
+
+        let mut t_prove = Blake3Transcript::new(b"gather_dk512");
+        let mut t_verify = Blake3Transcript::new(b"gather_dk512");
+        let cc: Fr = t_prove.challenge_scalar();
+        let csc: Fr = t_prove.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+        let _: Fr = t_verify.challenge_scalar();
+
+        let (lookup_input, table_input) =
+            build_gather_logup_inputs(&k, w, heads, s, cc, csc)?;
+        let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
+        let proof_t = new_batch_multiple_sizes_prove(&[table_input], &mut t_prove)?;
+
+        let instances = build_gather_verifier_instances(w, rows, dk, cc, csc)?;
+        let claim_l = new_verify_logup_proof_multiple_sizes(
+            &proof_l,
+            &instances[..1],
+            &mut t_verify,
+        )?;
+        let claim_t = new_verify_logup_proof_multiple_sizes(
+            &proof_t,
+            &instances[1..],
+            &mut t_verify,
+        )?;
+        ensure!(
+            fraction_balanced(&claim_l, &claim_t),
+            "dk256-ratio512 gather fraction balance broken"
+        );
+        Ok(())
     }
 
     /// e2e 精确几何复现：s_pad=1024, w=512（512× 折叠比 = 窗口大小），dk=3。
@@ -843,12 +1010,38 @@ impl GatherRowsCtx {
         let n_lookup = num_vars_of(t_len) - 1;
         let n_table = num_vars_of(rows_pad) - 1;
         #[cfg(feature = "alpha-debug-shapes")]
-        eprintln!(
-            "[alpha-shape] Rows gkr: node={id} t_len={t_len} rows_pad={} dk={dk} n_l={n_lookup} n_t={n_table} lookup_circuits={:?} table_circuits={:?}",
-            heads * s_pad,
-            logup_proof_lookup.circuit_outputs().len(),
-            logup_proof_table.circuit_outputs().len(),
-        );
+        {
+            eprintln!(
+                "[alpha-shape] Rows gkr: node={id} t_len={t_len} rows_pad={} dk={dk} n_l={n_lookup} n_t={n_table} lookup_circuits={:?} table_circuits={:?}",
+                heads * s_pad,
+                logup_proof_lookup.circuit_outputs().len(),
+                logup_proof_table.circuit_outputs().len(),
+            );
+            // P1/α 调试：dump k_field（首个 gather 节点）供单元重放
+            if std::env::var("ZKML_DUMP_KFIELD").is_ok() && !std::path::Path::new("/tmp/kfield_dumped").exists() {
+                let mut csv = String::new();
+                for row in &k_field {
+                    for (d, v) in row.iter().enumerate() {
+                        if d > 0 {
+                            csv.push(',');
+                        }
+                        csv.push_str(&v.into_bigint().to_string());
+                    }
+                    csv.push('\n');
+                }
+                let _ = std::fs::write("/tmp/kfield_dump.csv", &csv);
+                let _ = std::fs::write(
+                    "/tmp/kfield_meta.txt",
+                    format!(
+                        "heads={heads} s_pad={s_pad} s={s} dk={dk} w={w}\ncc={}\ncsc={}",
+                        constant_challenge.into_bigint().to_string(),
+                        column_separation_challenge.into_bigint().to_string()
+                    ),
+                );
+                let _ = std::fs::write("/tmp/kfield_dumped", "1");
+                eprintln!("[alpha-shape] k_field dumped to /tmp/kfield_dump.csv");
+            }
+        }
         let inst_l = LogUpVerifierInstance::new(
             constant_challenge,
             column_separation_challenge,
@@ -863,6 +1056,8 @@ impl GatherRowsCtx {
             ProofType::Table,
             n_table,
         );
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!("[alpha-shape] Rows gkr verify: node={id} lookup side begin");
         let claim_l = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_lookup,
             &[inst_l],
@@ -871,6 +1066,8 @@ impl GatherRowsCtx {
             Ok(c) => c,
             Err(e) => anyhow::bail!("rows lookup gkr verify node {id}: {e:#}"),
         };
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!("[alpha-shape] Rows gkr verify: node={id} lookup OK, table side begin");
         let claim_t = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_table,
             &[inst_t],
