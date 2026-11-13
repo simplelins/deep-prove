@@ -39,7 +39,12 @@ impl RMSNorm<Element> {
         // 提交的多项式）vs 现在从同一 step 数据重新生成的 witness：
         // - 不一致 → witness-gen 非确定性（数据/并行竞态）
         // - 一致而 linking 自检仍触发 → claim 链是移动部件
+        //
+        // ⚠️ 海森堡警告：此探针每个 rmsnorm 节点全量重跑 witness-gen（成本翻倍），
+        // 扰动时序会关闭竞态窗口（实测 v7 八轮零捕获）。默认关闭，仅在
+        // 复现判定时用 ZKML_WREGEN_CHECK=1 显式开启。
         #[cfg(feature = "p1-debug")]
+        if std::env::var("ZKML_WREGEN_CHECK").is_ok() {
         {
             let frozen = prover.lookup_witness(id)?;
             let fresh_gen = self.lookup_witness(id, step_data)?;
@@ -69,6 +74,7 @@ impl RMSNorm<Element> {
             if mismatches > 0 {
                 eprintln!("[p1-wregen] node {id}: witness 重生成比对 {mismatches} 个 poly 不一致");
             }
+        }
         }
 
         let LookupProverResult {
