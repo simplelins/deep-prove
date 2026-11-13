@@ -715,6 +715,9 @@ where
             (Layer::AttentionMask(attention_mask), LayerCtx::AttentionMask(info)) => {
                 attention_mask.prove(node_id, info, last_claims, step_data, prover)
             }
+            (Layer::GatherRows(gather), LayerCtx::GatherRows(info)) => {
+                gather.prove(node_id, info, last_claims, step_data, prover)
+            }
             (Layer::EinSum(einsum), LayerCtx::EinSum(info)) => {
                 einsum.prove(node_id, info, last_claims, step_data, prover)
             }
