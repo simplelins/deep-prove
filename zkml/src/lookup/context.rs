@@ -168,6 +168,11 @@ impl<'a, F: PrimeField> LookupWitnessGen<'a, F> {
         self.poly_to_commit.insert(node_id, witness);
     }
 
+    /// P1 调试：读取某节点的 witness 多项式（重生成比对用）。
+    pub fn polys(&self, node_id: &NodeId) -> Option<&[DensePolynomial<'a, F>]> {
+        self.poly_to_commit.get(node_id).map(|v| v.as_slice())
+    }
+
     pub fn insert_element_count(&mut self, table: Table, elements: HashMap<Element, u64>) {
         self.element_count.insert(table, elements);
     }

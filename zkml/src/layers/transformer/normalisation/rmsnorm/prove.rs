@@ -35,6 +35,42 @@ impl RMSNorm<Element> {
         )?;
         let table = Table::new_normalisation(normalisation_scaling_factor.bit_size() + 1);
 
+        // P1 决定性探针：witness 重生成比对。冻结 witness（witness-gen 时刻
+        // 提交的多项式）vs 现在从同一 step 数据重新生成的 witness：
+        // - 不一致 → witness-gen 非确定性（数据/并行竞态）
+        // - 一致而 linking 自检仍触发 → claim 链是移动部件
+        #[cfg(feature = "p1-debug")]
+        {
+            let frozen = prover.lookup_witness(id)?;
+            let fresh_gen = self.lookup_witness(id, step_data)?;
+            let fresh_polys = fresh_gen.polys(&id).unwrap_or(&[]);
+            let mut mismatches = 0usize;
+            for (i, (fr, fz)) in fresh_polys.iter().zip(frozen.iter()).enumerate() {
+                let fresh_evals: Vec<F> = fr.evals().into_iter().collect();
+                let frozen_evals: Vec<F> = fz.polynomial().evals().into_iter().collect();
+                if fresh_evals.len() != frozen_evals.len() {
+                    eprintln!(
+                        "[p1-wregen] node {id} poly {i}: 长度不一致 fresh={} frozen={}",
+                        fresh_evals.len(),
+                        frozen_evals.len()
+                    );
+                    mismatches += 1;
+                } else {
+                    let fh = witness_fnv(&fresh_evals);
+                    let zh = witness_fnv(&frozen_evals);
+                    if fh != zh {
+                        mismatches += 1;
+                        eprintln!(
+                            "[p1-wregen] node {id} poly {i}: 指纹不一致 fresh={fh:#x} frozen={zh:#x}"
+                        );
+                    }
+                }
+            }
+            if mismatches > 0 {
+                eprintln!("[p1-wregen] node {id}: witness 重生成比对 {mismatches} 个 poly 不一致");
+            }
+        }
+
         let LookupProverResult {
             generic_proof,
             input_claims,
@@ -99,4 +135,19 @@ impl RMSNorm<Element> {
         // Return the input claim for the next layer
         Ok(input_claims)
     }
+}
+
+/// P1 调试：witness 多项式指纹（FNV-1a over the evals）。
+#[cfg(feature = "p1-debug")]
+pub(crate) fn witness_fnv<F: PrimeField>(evals: &[F]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for x in evals {
+        for limb in x.into_bigint().as_ref() {
+            h ^= limb & 0xffff;
+            h = h.wrapping_mul(0x100000001b3);
+            h ^= (limb >> 16) & 0xffff;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
 }
