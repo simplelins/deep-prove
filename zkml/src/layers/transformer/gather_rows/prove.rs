@@ -1241,7 +1241,12 @@ impl GatherRowsCtx {
         // 4) The claims wiring (§12): the logup point covers the (head, i, off)
         //    variables; the flattened poly's d-variables bind to the basis
         //    vectors e_d.
+        //    双侧点必须各用各的：K' poly = t_len·dk → lookup 点(log2(t_len) 维)
+        //    ++ e_d；输入 V poly = rows_pad·dk → table 点(log2(rows_pad) 维)
+        //    ++ e_d。此前 input_claims 误用 lookup 点 → 上游收到 27 维点但
+        //    V poly 只有 18 变量（"Point length 27 does not match total variables 18"）。
         let logup_point = claim_l.point().to_vec();
+        let table_point = claim_t.point().to_vec();
         let n_d_vars = ceil_log2(dk);
         let mut k_prime_claims = Vec::with_capacity(dk);
         let mut input_claims = Vec::with_capacity(dk);
@@ -1250,7 +1255,8 @@ impl GatherRowsCtx {
             if d < e_d.len() {
                 e_d[d] = F::ONE;
             }
-            let point: Vec<F> = logup_point.iter().chain(e_d.iter()).copied().collect();
+            let point_l: Vec<F> = logup_point.iter().chain(e_d.iter()).copied().collect();
+            let point_t: Vec<F> = table_point.iter().chain(e_d.iter()).copied().collect();
 
             // claim 布局（combine_final_evals）：lookup = [v0..v_{dk-1}, index]，
             // table = [multiplicity, v0..v_{dk-1}, index] —— table 的第 0 个
@@ -1259,13 +1265,13 @@ impl GatherRowsCtx {
                 .output_claims()
                 .get(d)
                 .ok_or_else(|| anyhow::anyhow!("missing lookup output claim {d}"))?;
-            k_prime_claims.push(Claim::new(point.clone(), l_claim.evaluation()));
+            k_prime_claims.push(Claim::new(point_l, l_claim.evaluation()));
 
             let t_claim = claim_t
                 .output_claims()
                 .get(d + 1)
                 .ok_or_else(|| anyhow::anyhow!("missing table output claim {d}"))?;
-            input_claims.push(Claim::new(point.clone(), t_claim.evaluation()));
+            input_claims.push(Claim::new(point_t, t_claim.evaluation()));
         }
         // 单 committed poly（K'）：logup 点 claims + consumer 的 claims 一起注册。
         // consumer（softmax/AV einsum 的 linking）对其输入（= 本节点输出）产生的
@@ -1616,8 +1622,10 @@ impl GatherRowsCtx {
             "gather fraction balance broken at node {id}"
         );
 
-        // 3) The claims wiring (the mirror)
+        // 3) The claims wiring (the mirror of prove_gather)：K' claims 用 lookup
+        //    点，input claims（V poly）用 table 点——与 prove 侧一致。
         let logup_point = claim_l.point().to_vec();
+        let table_point = claim_t.point().to_vec();
         let n_d_vars = ceil_log2(dk);
         let mut k_prime_claims = Vec::with_capacity(dk);
         let mut input_claims = Vec::with_capacity(dk);
@@ -1626,7 +1634,8 @@ impl GatherRowsCtx {
             if d < e_d.len() {
                 e_d[d] = F::ONE;
             }
-            let point: Vec<F> = logup_point.iter().chain(e_d.iter()).copied().collect();
+            let point_l: Vec<F> = logup_point.iter().chain(e_d.iter()).copied().collect();
+            let point_t: Vec<F> = table_point.iter().chain(e_d.iter()).copied().collect();
 
             // claim 布局：lookup = [v0..v_{dk-1}, index]，table = [mult, v0..v_{dk-1}, index]
             let l_claim = claim_l
@@ -1634,14 +1643,14 @@ impl GatherRowsCtx {
                 .get(d)
                 .ok_or_else(|| anyhow::anyhow!("missing lookup output claim {d}"))?;
             k_prime_claims.push(
-                Claim::new(point.clone(), l_claim.evaluation()),
+                Claim::new(point_l, l_claim.evaluation()),
             );
 
             let t_claim = claim_t
                 .output_claims()
                 .get(d + 1)
                 .ok_or_else(|| anyhow::anyhow!("missing table output claim {d}"))?;
-            input_claims.push(Claim::new(point.clone(), t_claim.evaluation()));
+            input_claims.push(Claim::new(point_t, t_claim.evaluation()));
         }
 
         // 3b) index/重数列 claim 对照闭式重算（与 prove 侧一致）
