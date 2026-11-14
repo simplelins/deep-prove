@@ -168,9 +168,18 @@ pub fn new_batch_multiple_sizes_prove<F: PrimeField, T: Transcript>(
     // The batching_challenge is used because at each layer we have one claim about the "low" half of a polynomial and one claim about the "high" half
     // they can be combined together to get that `f(r1,...,rk-1,rk) = rk * f(r1,...,rk-1, 1) + (1 - rk) * f(r1,...,rk-1, 0)`. The Sumcheck gives us the challenges `r1,...,rk-1`
     // and then `rk` is the `batching_challenge`.
-    let mut batching_challenge = transcript.append_and_sample(b"initial_batching");
-    let mut alpha = transcript.append_and_sample(b"initial_alpha");
-    let mut lambda = transcript.append_and_sample(b"initial_lambda");
+    let mut batching_challenge: F = transcript.append_and_sample(b"initial_batching");
+    let mut alpha: F = transcript.append_and_sample(b"initial_alpha");
+    let mut lambda: F = transcript.append_and_sample(b"initial_lambda");
+    // GKR 调试：初始三挑战 dump（eprintln 不触碰 transcript，无扰动）
+    if std::env::var("ZKML_DUMP_GKR_CHALS").is_ok() {
+        eprintln!(
+            "[gkr-chals] batching={:?} alpha={:?} lambda={:?}",
+            batching_challenge.into_bigint(),
+            alpha.into_bigint(),
+            lambda.into_bigint()
+        );
+    }
 
     let mut current_claim: F;
     // The initial sumcheck point is just the batching challenge as in the first round the polynomials are univariate

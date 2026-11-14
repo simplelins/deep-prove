@@ -1058,13 +1058,41 @@ impl GatherRowsCtx {
         );
         #[cfg(feature = "alpha-debug-shapes")]
         eprintln!("[alpha-shape] Rows gkr verify: node={id} lookup side begin");
-        let claim_l = match new_verify_logup_proof_multiple_sizes(
-            &logup_proof_lookup,
-            &[inst_l],
-            prover.transcript,
-        ) {
-            Ok(c) => c,
-            Err(e) => anyhow::bail!("rows lookup gkr verify node {id}: {e:#}"),
+        #[cfg(feature = "alpha-debug-shapes")]
+        let claim_l = {
+            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                new_verify_logup_proof_multiple_sizes(
+                    &logup_proof_lookup,
+                    &[inst_l],
+                    prover.transcript,
+                )
+            }));
+            match res {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => anyhow::bail!("rows lookup gkr verify node {id}: {e:#}"),
+                Err(panic_payload) => {
+                    let msg = panic_payload
+                        .downcast_ref::<String>()
+                        .map(|s| s.clone())
+                        .or_else(|| {
+                            panic_payload.downcast_ref::<&str>().map(|s| s.to_string())
+                        })
+                        .unwrap_or_default();
+                    for (ci, evals) in logup_proof_lookup.circuit_outputs().iter().enumerate() {
+                        let vals: Vec<String> = evals
+                            .iter()
+                            .map(|v| v.into_bigint().to_string())
+                            .collect();
+                        eprintln!(
+                            "[alpha-gkr-panic] node={id} circuit{ci} n_outputs={} outputs={:?}",
+                            vals.len(),
+                            vals
+                        );
+                    }
+                    eprintln!("[alpha-gkr-panic] node={id} msg={msg}");
+                    anyhow::bail!("rows lookup gkr verify panicked node {id}: {msg}");
+                }
+            }
         };
         #[cfg(feature = "alpha-debug-shapes")]
         eprintln!("[alpha-shape] Rows gkr verify: node={id} lookup OK, table side begin");
