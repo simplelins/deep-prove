@@ -1105,16 +1105,19 @@ impl GatherRowsCtx {
                         })
                         .unwrap_or_default();
                     #[cfg(feature = "alpha-debug-shapes")]
-                    for (ci, evals) in logup_proof_lookup.circuit_outputs().iter().enumerate() {
-                        let vals: Vec<String> = evals
-                            .iter()
-                            .map(|v| v.into_bigint().to_string())
-                            .collect();
-                        eprintln!(
-                            "[alpha-gkr-panic] node={id} circuit{ci} n_outputs={} outputs={:?}",
-                            vals.len(),
-                            vals
-                        );
+                    {
+                        for (ci, evals) in logup_proof_lookup.circuit_outputs().iter().enumerate() {
+                            let vals: Vec<String> = evals
+                                .iter()
+                                .map(|v| v.into_bigint().to_string())
+                                .collect();
+                            eprintln!(
+                                "[alpha-gkr-panic] node={id} circuit{ci} n_outputs={} outputs={:?}",
+                                vals.len(),
+                                vals
+                            );
+                        }
+
                     }
                     eprintln!("[alpha-gkr-panic] node={id} msg={msg}");
                     anyhow::bail!("rows lookup gkr verify panicked node {id}: {msg}");

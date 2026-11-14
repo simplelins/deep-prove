@@ -178,6 +178,22 @@ pub fn new_verify_logup_proof_multiple_sizes<F: PrimeField, T: Transcript>(
         // Compute the current_claim
         current_claim =
             verifying_info.compute_current_claim(&wit_evals, alpha, lambda, batching_challenge);
+        // GKR 调试：verifier 实际使用的 wit_evals 与推导的 current_claim
+        if std::env::var("ZKML_DUMP_GKR_CHALS").is_ok() {
+            let wit_str: Vec<String> = wit_evals
+                .iter()
+                .map(|v| v.into_bigint().to_string())
+                .collect();
+            eprintln!(
+                "[gkr-verify] i={i} remaining_layers={remaining_layers} wit_evals({}={:?}) current_claim={:?} alpha={:?} lambda={:?} batch={:?}",
+                wit_evals.len(),
+                wit_str,
+                current_claim.into_bigint(),
+                alpha.into_bigint(),
+                lambda.into_bigint(),
+                batching_challenge.into_bigint()
+            );
+        }
 
         // Append the current claim to the transcript
         transcript.append_scalars(&[current_claim]);

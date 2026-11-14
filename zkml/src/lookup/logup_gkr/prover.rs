@@ -283,6 +283,21 @@ pub fn new_batch_multiple_sizes_prove<F: PrimeField, T: Transcript>(
 
         let (proof, state) = IOPProverState::<F>::prove(virtual_poly, transcript);
 
+        // GKR 调试：round-1 的 message evals dump（prover 端）
+        if std::env::var("ZKML_DUMP_GKR_CHALS").is_ok() {
+            if let Some(first_msg) = proof.proofs.first() {
+                let evals_str: Vec<String> = first_msg
+                    .evaluations
+                    .iter()
+                    .map(|v| v.into_bigint().to_string())
+                    .collect();
+                eprintln!(
+                    "[gkr-msg] layer_vars={current_layer_vars} round1_evals={:?}",
+                    evals_str
+                );
+            }
+        }
+
         // Update the sumcheck point
         sumcheck_point = state.collect_raw_challenges();
 
