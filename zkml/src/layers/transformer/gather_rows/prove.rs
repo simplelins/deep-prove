@@ -420,9 +420,10 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         // meta: heads=1 s_pad=1024 s=1023 dk=256 w=512
         let mut parts = meta.split_whitespace();
         let get = |k: &str| -> usize {
+            // 精确键匹配："s" 不得误匹配 "s_pad"（s=1023 场景的失败重放依赖它）
             parts
                 .clone()
-                .find(|p| p.starts_with(k))
+                .find(|p| p.split('=').next() == Some(k))
                 .and_then(|p| p.split('=').nth(1))
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0)
@@ -444,6 +445,15 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
 
         let mut t_prove = Blake3Transcript::new(b"gather_replay");
         let mut t_verify = Blake3Transcript::new(b"gather_replay");
+        // ZKML_REPLAY_E2E_MIRROR=1：完全镜像 e2e prove_gather/self-verify 的
+        // 挑战推导（同 dst gather_gkr + append_and_sample 标签），用于判别
+        // "挑战值依赖"失败：重放自身派生挑战通过、e2e 挑战失败 → 协议对
+        // 特定挑战值有 bug；镜像后仍通过 → e2e 运行时另有 transcript absorb。
+        let e2e_mirror = std::env::var("ZKML_REPLAY_E2E_MIRROR").is_ok();
+        if e2e_mirror {
+            t_prove = Blake3Transcript::new(b"gather_gkr");
+            t_verify = Blake3Transcript::new(b"gather_gkr");
+        }
         // 先序状态实验：模拟 chunk 内先序节点占据的 transcript 状态
         // （e2e 中 gather 的 prove 在同 chunk 多个 requant 的 prove 之后）
         if let Ok(prefix_len) = std::env::var("ZKML_REPLAY_PREFIX") {
@@ -465,13 +475,45 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
             .get(2)
             .and_then(|l| l.strip_prefix("csc="))
             .and_then(|v| Fr::from_str(v).ok());
-        let cc: Fr = cc_from_meta.unwrap_or_else(|| t_prove.challenge_scalar());
-        let csc: Fr = csc_from_meta.unwrap_or_else(|| t_prove.challenge_scalar());
+        let cc: Fr = match (cc_from_meta, e2e_mirror) {
+            (Some(v), false) => v,
+            (_, true) => {
+                // 镜像模式必须执行 label absorb（与 prove_gather 一致），
+                // 并断言派生值与 e2e meta 一致
+                let derived: Fr = t_prove.append_and_sample(b"gather_cc");
+                if let Some(v) = cc_from_meta {
+                    ensure!(v == derived, "mirror cc mismatch: meta={v} derived={derived}");
+                }
+                derived
+            }
+            (Some(v), _) => v,
+            (None, false) => t_prove.challenge_scalar(),
+        };
+        let csc: Fr = match (csc_from_meta, e2e_mirror) {
+            (Some(v), false) => v,
+            (_, true) => {
+                let derived: Fr = t_prove.append_and_sample(b"gather_csc");
+                if let Some(v) = csc_from_meta {
+                    ensure!(v == derived, "mirror csc mismatch: meta={v} derived={derived}");
+                }
+                derived
+            }
+            (Some(v), _) => v,
+            (None, false) => t_prove.challenge_scalar(),
+        };
+        if e2e_mirror {
+            // 镜像模式下 verify 侧也做同样的标签采样（与 verify_gather 一致）
+            let _: Fr = t_verify.append_and_sample(b"gather_cc");
+            let _: Fr = t_verify.append_and_sample(b"gather_csc");
+            eprintln!("replay: e2e mirror mode (dst=gather_gkr, append_and_sample labels)");
+        }
         if cc_from_meta.is_some() {
             eprintln!("replay: using e2e cc/csc from meta");
         }
-        let _: Fr = t_verify.challenge_scalar();
-        let _: Fr = t_verify.challenge_scalar();
+        if !e2e_mirror {
+            let _: Fr = t_verify.challenge_scalar();
+            let _: Fr = t_verify.challenge_scalar();
+        }
 
         let (lookup_input, table_input) =
             build_gather_logup_inputs(&k, w, heads, s, cc, csc)?;
@@ -1022,6 +1064,31 @@ impl GatherRowsCtx {
                     .collect()
             })
             .collect();
+        #[cfg(feature = "alpha-debug-shapes")]
+        {
+            // 每次 gather prove 的数据指纹（低成本，成功/失败对比用）
+            fn kfield_fnv<F: PrimeField>(evals: &[F]) -> u64 {
+                let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+                for x in evals {
+                    for limb in x.into_bigint().as_ref() {
+                        h ^= limb & 0xffff;
+                        h = h.wrapping_mul(0x100000001b3);
+                        h ^= (limb >> 16) & 0xffff;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                }
+                h
+            }
+            let flat_fnv = kfield_fnv(
+                &k_field
+                    .iter()
+                    .flat_map(|r| r.iter().copied())
+                    .collect::<Vec<F>>(),
+            );
+            eprintln!(
+                "[alpha-shape] kfield_fnv node={id} heads={heads} s={s} s_pad={s_pad} w={w} dk={dk} fnv={flat_fnv:#x}"
+            );
+        }
         let (lookup_input, table_input) = build_gather_logup_inputs(
             &k_field,
             w,
@@ -1030,9 +1097,8 @@ impl GatherRowsCtx {
             constant_challenge,
             column_separation_challenge,
         )?;
-        // GKR = 自包含子协议：使用独立 transcript 避免 outer protocol 的
-        // transcript 状态偏移导致 prove/verify 挑战不匹配（根因修复）
-        let mut gkr_transcript = dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr");
+        // GKR = 自包含子协议：使用独立 transcript（cc/csc 已在上方 absorb，
+        // 此处不得重建——重建会抹掉 label absorb，使 prove/verify 挑战分叉）
         let logup_proof_lookup =
             new_batch_multiple_sizes_prove(&[lookup_input], &mut gkr_transcript)?;
         let logup_proof_table =
@@ -1129,7 +1195,28 @@ impl GatherRowsCtx {
                                 vals
                             );
                         }
-
+                        // 失败现场完整 dump：k_field + 几何 + cc/csc（离线重放用）
+                        let fail_path = format!("/tmp/kfield_fail_{}.csv", id);
+                        let mut csv = String::new();
+                        for row in &k_field {
+                            for (d, v) in row.iter().enumerate() {
+                                if d > 0 {
+                                    csv.push(',');
+                                }
+                                csv.push_str(&v.into_bigint().to_string());
+                            }
+                            csv.push('\n');
+                        }
+                        let _ = std::fs::write(&fail_path, &csv);
+                        let _ = std::fs::write(
+                            format!("/tmp/kfield_fail_{}_meta.txt", id),
+                            format!(
+                                "heads={heads} s_pad={s_pad} s={s} dk={dk} w={w}\ncc={}\ncsc={}",
+                                constant_challenge.into_bigint().to_string(),
+                                column_separation_challenge.into_bigint().to_string()
+                            ),
+                        );
+                        eprintln!("[alpha-gkr-panic] node={id} k_field dumped to {fail_path}");
                     }
                     eprintln!("[alpha-gkr-panic] node={id} msg={msg}");
                     anyhow::bail!("rows lookup gkr verify panicked node {id}: {msg}");

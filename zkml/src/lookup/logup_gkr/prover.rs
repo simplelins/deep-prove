@@ -266,6 +266,22 @@ pub fn new_batch_multiple_sizes_prove<F: PrimeField, T: Transcript>(
         current_claim =
             proving_info.compute_current_claim(&wit_evals, alpha, lambda, batching_challenge);
 
+        // GKR 调试：每轮 wit_evals/claim/挑战 dump（round-0 判别用）
+        if std::env::var("ZKML_DUMP_GKR_CHALS").is_ok() {
+            eprintln!(
+                "[gkr-round] layer_vars={} wit_evals={:?} claim={} batch={} alpha={} lambda={}",
+                current_layer_vars,
+                wit_evals
+                    .iter()
+                    .map(|v| v.into_bigint().to_string())
+                    .collect::<Vec<_>>(),
+                current_claim.into_bigint(),
+                batching_challenge.into_bigint(),
+                alpha.into_bigint(),
+                lambda.into_bigint(),
+            );
+        }
+
         // Append the current claim to the transcript
         transcript.append_scalars(&[current_claim]);
 
