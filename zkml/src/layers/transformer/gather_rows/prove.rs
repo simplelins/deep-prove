@@ -980,9 +980,11 @@ impl GatherRowsCtx {
         let t_len = heads * s_pad * w;
 
         // 1) The challenges (sampled at this point; the verifier mirrors)
-        let constant_challenge: F = prover.transcript.append_and_sample(b"gather_cc");
+        // GKR 子协议独立 transcript：避免 outer protocol 状态偏移导致 prove/verify 挑战不匹配
+        let mut gkr_transcript = dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr");
+        let constant_challenge: F = gkr_transcript.append_and_sample(b"gather_cc");
         let column_separation_challenge: F =
-            prover.transcript.append_and_sample(b"gather_csc");
+            gkr_transcript.append_and_sample(b"gather_csc");
 
         // 2) The two logUp inputs: the K' columns from the committed witness
         //    poly (the chunk's batch commit), the K columns from the input.
@@ -1028,10 +1030,13 @@ impl GatherRowsCtx {
             constant_challenge,
             column_separation_challenge,
         )?;
+        // GKR = 自包含子协议：使用独立 transcript 避免 outer protocol 的
+        // transcript 状态偏移导致 prove/verify 挑战不匹配（根因修复）
+        let mut gkr_transcript = dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr");
         let logup_proof_lookup =
-            new_batch_multiple_sizes_prove(&[lookup_input], prover.transcript)?;
+            new_batch_multiple_sizes_prove(&[lookup_input], &mut gkr_transcript)?;
         let logup_proof_table =
-            new_batch_multiple_sizes_prove(&[table_input], prover.transcript)?;
+            new_batch_multiple_sizes_prove(&[table_input], &mut gkr_transcript)?;
 
         // 3) The claims at the logup point + the fraction balance
         let n_lookup = num_vars_of(t_len) - 1;
@@ -1085,12 +1090,19 @@ impl GatherRowsCtx {
         );
         #[cfg(feature = "alpha-debug-shapes")]
         eprintln!("[alpha-shape] Rows gkr verify: node={id} lookup side begin");
+        // 自验证必须镜像外部 verify_gather 的挑战推导：全新 transcript（同 dst）
+        // + cc/csc 重放。若复用上面已被两个 GKR prove 推进的 gkr_transcript，
+        // 派生挑战与 prove 时不同，round-0 一致性检查必然失败。
+        let mut selfverify_transcript =
+            dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr");
+        let _: F = selfverify_transcript.append_and_sample(b"gather_cc");
+        let _: F = selfverify_transcript.append_and_sample(b"gather_csc");
         let claim_l = {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 new_verify_logup_proof_multiple_sizes(
                     &logup_proof_lookup,
                     &[inst_l],
-                    prover.transcript,
+                    &mut selfverify_transcript,
                 )
             }));
             match res {
@@ -1129,7 +1141,7 @@ impl GatherRowsCtx {
         let claim_t = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_table,
             &[inst_t],
-            prover.transcript,
+            &mut selfverify_transcript,
         ) {
             Ok(c) => c,
             Err(e) => anyhow::bail!("rows table gkr verify node {id}: {e:#}"),
@@ -1267,9 +1279,10 @@ impl GatherRowsCtx {
         let cells = heads * q_pad * s_pad;
 
         // 1) challenges
-        let constant_challenge: F = prover.transcript.append_and_sample(b"gather_cc");
+        let mut gkr_transcript = dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr_sw");
+        let constant_challenge: F = gkr_transcript.append_and_sample(b"gather_cc");
         let column_separation_challenge: F =
-            prover.transcript.append_and_sample(b"gather_csc");
+            gkr_transcript.append_and_sample(b"gather_csc");
 
         // 2) committed gathered poly（查询侧 value 列）与输入 cell 值（表侧 value 列）
         let (k_prime_evals, k_prime_commitment) = {
@@ -1310,9 +1323,9 @@ impl GatherRowsCtx {
             column_separation_challenge,
         )?;
         let logup_proof_lookup =
-            new_batch_multiple_sizes_prove(&[lookup_input], prover.transcript)?;
+            new_batch_multiple_sizes_prove(&[lookup_input], &mut gkr_transcript)?;
         let logup_proof_table =
-            new_batch_multiple_sizes_prove(&[table_input], prover.transcript)?;
+            new_batch_multiple_sizes_prove(&[table_input], &mut gkr_transcript)?;
 
         // 3) claims at the logup points + fraction balance
         #[cfg(feature = "alpha-debug-shapes")]
@@ -1337,10 +1350,15 @@ impl GatherRowsCtx {
             ProofType::Table,
             num_vars_of(cells) - 1,
         );
+        // 自验证镜像 verify_score_window：全新 transcript（同 dst）+ cc/csc 重放
+        let mut selfverify_transcript =
+            dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr_sw");
+        let _: F = selfverify_transcript.append_and_sample(b"gather_cc");
+        let _: F = selfverify_transcript.append_and_sample(b"gather_csc");
         let claim_l = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_lookup,
             &[inst_l],
-            prover.transcript,
+            &mut selfverify_transcript,
         ) {
             Ok(c) => c,
             Err(e) => anyhow::bail!("score window lookup gkr verify node {id}: {e:#}"),
@@ -1348,7 +1366,7 @@ impl GatherRowsCtx {
         let claim_t = match new_verify_logup_proof_multiple_sizes(
             &logup_proof_table,
             &[inst_t],
-            prover.transcript,
+            &mut selfverify_transcript,
         ) {
             Ok(c) => c,
             Err(e) => anyhow::bail!("score window table gkr verify node {id}: {e:#}"),
@@ -1470,9 +1488,14 @@ impl GatherRowsCtx {
         let t_len = heads * s_pad * w;
 
         // 1) The challenges (mirroring the prover's sampling)
-        let constant_challenge: F = verifier.transcript.append_and_sample(b"gather_cc");
+        // 独立 transcript：与 prove_gather 的 gkr_transcript 同 dst、同采样序列。
+        // 共享外层 transcript 的状态在 prove/verify 两侧必然不同步（流式协议中
+        // 两侧 absorb 的内容与顺序不对称），GKR 挑战必须从相同初始状态推导。
+        let mut gkr_transcript =
+            dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr");
+        let constant_challenge: F = gkr_transcript.append_and_sample(b"gather_cc");
         let column_separation_challenge: F =
-            verifier.transcript.append_and_sample(b"gather_csc");
+            gkr_transcript.append_and_sample(b"gather_csc");
 
         // 2) The claims at the logup point + the fraction balance
         let n_lookup = num_vars_of(t_len) - 1;
@@ -1494,12 +1517,12 @@ impl GatherRowsCtx {
         let claim_l = new_verify_logup_proof_multiple_sizes(
             &proof.logup_proof_lookup,
             &[inst_l],
-            verifier.transcript,
+            &mut gkr_transcript,
         )?;
         let claim_t = new_verify_logup_proof_multiple_sizes(
             &proof.logup_proof_table,
             &[inst_t],
-            verifier.transcript,
+            &mut gkr_transcript,
         )?;
         ensure!(
             fraction_balanced(&claim_l, &claim_t),
@@ -1628,10 +1651,13 @@ impl GatherRowsCtx {
         let t_len = heads * q_pad * w;
         let cells = heads * q_pad * s_pad;
 
-        // 1) challenges
-        let constant_challenge: F = verifier.transcript.append_and_sample(b"gather_cc");
+        // 1) challenges — 独立 transcript，与 prove_score_window 的 gkr_transcript
+        // 同 dst（b"gather_gkr_sw"）、同采样序列，理由同 verify_gather。
+        let mut gkr_transcript =
+            dp_crypto::arkyper::transcript::blake3::Blake3Transcript::new(b"gather_gkr_sw");
+        let constant_challenge: F = gkr_transcript.append_and_sample(b"gather_cc");
         let column_separation_challenge: F =
-            verifier.transcript.append_and_sample(b"gather_csc");
+            gkr_transcript.append_and_sample(b"gather_csc");
 
         // 2) GKR verify + fraction balance
         let inst_l = LogUpVerifierInstance::new(
@@ -1651,12 +1677,12 @@ impl GatherRowsCtx {
         let claim_l = new_verify_logup_proof_multiple_sizes(
             &proof.logup_proof_lookup,
             &[inst_l],
-            verifier.transcript,
+            &mut gkr_transcript,
         )?;
         let claim_t = new_verify_logup_proof_multiple_sizes(
             &proof.logup_proof_table,
             &[inst_t],
-            verifier.transcript,
+            &mut gkr_transcript,
         )?;
         ensure!(
             fraction_balanced(&claim_l, &claim_t),
