@@ -386,9 +386,11 @@ where
             };
             // P1 哈希链 forward 侧：记录各输入端口的张量哈希（run 线程、
             // witness-gen 之前）。键 = (node, port) 组合；witness-gen/prove
-            // 侧只查 port 0。仅 p1-debug。
+            // 侧只查 port 0。仅 p1-debug + ZKML_HASH_CHAIN=1
+            //（⚠️ 海森堡：input_tensors() 克隆全部输入张量 = GB 级内存扰动，
+            // 会关闭竞态窗口——哈希链三窗口稳定性已验证完毕，默认关闭）
             #[cfg(feature = "p1-debug")]
-            {
+            if std::env::var("ZKML_HASH_CHAIN").is_ok() {
                 if let Ok(inputs) = step.input_tensors() {
                     for (port, tensor) in inputs.iter().enumerate() {
                         crate::lookup::p1_probe::record_forward_input(
