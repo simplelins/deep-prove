@@ -19,6 +19,7 @@ impl AttentionMask<Element> {
         proof: &AttentionMaskProof<F>,
         last_claim: &Claim<F>,
         mask_verifying_data: MaskVerifyingData<F>,
+        unpadded_rows_len: usize,
         unpadded_seq_len: usize,
         verifier: &mut Verifier<F, T, PCS>,
     ) -> Result<Vec<Claim<F>>>
@@ -82,8 +83,12 @@ impl AttentionMask<Element> {
 
         let input_evals = &evaluations[additional_mask_poly as usize..];
 
-        let (row_lt_eval, column_lt_eval) =
-            self.evaluate_row_column_lt_polys::<F>(row_point, column_point, unpadded_seq_len)?;
+        let (row_lt_eval, column_lt_eval) = self.evaluate_row_column_lt_polys::<F>(
+            row_point,
+            column_point,
+            unpadded_rows_len,
+            unpadded_seq_len,
+        )?;
         let lt_eval = row_lt_eval * column_lt_eval;
         let neg_inf_field: F = self.negative_infinity.to_field();
         let calc_eval = eq_eval
@@ -122,24 +127,25 @@ impl AttentionMask<Element> {
         &self,
         row_point: &[F],
         column_point: &[F],
+        unpadded_rows_len: usize,
         unpadded_seq_len: usize,
     ) -> Result<(F, F)> {
-        let bit_len = ceil_log2(unpadded_seq_len);
-        ensure!(
-            row_point.len() == bit_len,
-            "Row point length {} does not match unpadded seq len log2 {bit_len}",
-            row_point.len(),
-        );
+        // 方形化网格（见 prove 侧 from_claims_and_input）：两侧点长相同 =
+        // 方形边长的 bit 数。阈值分别取行/列的 unpadded 尺寸。
+        let bit_len = row_point.len();
         ensure!(
             column_point.len() == bit_len,
-            "Column point length {} does not match unpadded seq len log2 {bit_len}",
+            "Column point length {} does not match row point length {bit_len}",
             column_point.len(),
         );
-        let seq_len_bits = to_bit_sequence_le(unpadded_seq_len - 1, bit_len)
+        let rows_bits = to_bit_sequence_le(unpadded_rows_len - 1, bit_len)
             .map(|b| F::from(b as u64))
             .collect::<Vec<F>>();
-        let row_eval = eval_zeroifier_mle(row_point, &seq_len_bits);
-        let column_eval = eval_zeroifier_mle(column_point, &seq_len_bits);
+        let cols_bits = to_bit_sequence_le(unpadded_seq_len - 1, bit_len)
+            .map(|b| F::from(b as u64))
+            .collect::<Vec<F>>();
+        let row_eval = eval_zeroifier_mle(row_point, &rows_bits);
+        let column_eval = eval_zeroifier_mle(column_point, &cols_bits);
         Ok((row_eval, column_eval))
     }
 
@@ -264,12 +270,17 @@ impl<F: PrimeField> MaskVerifyingData<F> {
         let dim_points = input_shape.split_point(claim.point())?;
 
         // Make the eq_poly evaluations from the points for the last two dimensions
-        let eq_point = dim_points[rank - 2..]
-            .iter()
-            .rev()
-            .flat_map(|p| *p)
-            .copied()
-            .collect::<Vec<F>>();
+        // 点序 = [cols 点, rows 点]；方形化（见 prove 侧）后 cols 点用零扩展
+        // 到 rows 的变量数，与 prover 的构造完全一致。
+        let cols_point = dim_points[rank - 1];
+        let rows_point = dim_points[rank - 2];
+        let cols_vars = ceil_log2(input_shape.dim(-1).next_power_of_two());
+        let rows_vars = ceil_log2(input_shape.dim(-2).next_power_of_two());
+        let mut eq_point = cols_point.to_vec();
+        if cols_vars < rows_vars {
+            eq_point.resize(rows_vars, F::ZERO);
+        }
+        eq_point.extend(rows_point.iter().copied());
 
         let batching_challenges = dim_points[..rank - 2]
             .iter()

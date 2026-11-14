@@ -151,6 +151,32 @@ impl EinSum<Element> {
             .mapping
             .fix_axes(&split_points, &full_inputs, &unpadded_input_shapes)?;
         let axes_sizes = self.mapping.axes_sizes(&unpadded_input_shapes)?;
+        #[cfg(feature = "alpha-debug-shapes")]
+        {
+            let lhs_vars: Vec<usize> = fixed_lhs_polys
+                .iter()
+                .flatten()
+                .map(|p| p.num_vars())
+                .collect();
+            let rhs_vars: Vec<usize> = fixed_rhs_polys
+                .iter()
+                .flatten()
+                .map(|p| p.num_vars())
+                .collect();
+            eprintln!(
+                "[einsum-debug] equation={:?} inputs_padded={:?} outputs_padded={:?} axes(stacked,outer,contracted)={:?} contraction_vars={} lhs_polys={} lhs_vars={:?} rhs_polys={} rhs_vars={:?} claim_points={:?}",
+                self.equation,
+                full_inputs.iter().map(|t| t.shape().iter().copied().collect::<Vec<_>>()).collect::<Vec<_>>(),
+                output_shapes.iter().map(|s| s.iter().copied().collect::<Vec<_>>()).collect::<Vec<_>>(),
+                axes_sizes,
+                ceil_log2(axes_sizes[AxisType::Contracted]),
+                fixed_lhs_polys.iter().flatten().count(),
+                lhs_vars,
+                fixed_rhs_polys.iter().flatten().count(),
+                rhs_vars,
+                last_claims.iter().map(|c| c.point().len()).collect::<Vec<_>>(),
+            );
+        }
 
         let contraction_size = axes_sizes[AxisType::Contracted];
         let stacking_size = axes_sizes[AxisType::Stacked];

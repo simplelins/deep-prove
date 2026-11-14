@@ -200,18 +200,21 @@ impl<'a, F: PrimeField> VirtualPolynomial<'a, F> {
                     "some term product is empty scalar {scalar}, product {product:?}",
                 );
                 // sanity check: all mle in product must have same num_vars()
-                assert!(
-                    product
-                        .iter()
-                        .map(|expr| {
-                            match expr {
-                                Expression::WitIn(witin_id) => {
-                                    self.flattened_ml_extensions[*witin_id as usize].num_vars()
-                                }
-                                e => unimplemented!("unimplemented {:?}", e),
+                let product_vars: Vec<usize> = product
+                    .iter()
+                    .map(|expr| {
+                        match expr {
+                            Expression::WitIn(witin_id) => {
+                                self.flattened_ml_extensions[*witin_id as usize].num_vars()
                             }
-                        })
-                        .all_equal()
+                            e => unimplemented!("unimplemented {:?}", e),
+                        }
+                    })
+                    .collect();
+                assert!(
+                    product_vars.iter().all_equal(),
+                    "virtual poly product mixes mle var counts: {product_vars:?} (poly has {} mles)",
+                    self.flattened_ml_extensions.len(),
                 );
 
                 self.aux_info.max_degree = max(self.aux_info.max_degree, product.len());

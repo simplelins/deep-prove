@@ -809,6 +809,8 @@ where
                     };
                     // 记录该算子计算参数大小(元素数/num_vars/查表层), 见 `record_layer_params`
                     record_layer_params(&node_id, op.as_kind_str(), section, ctx)?;
+                    #[cfg(feature = "alpha-debug-shapes")]
+                    eprintln!("[node-prove] {node_id} {}", op.describe());
                     let my_claims = if op.is_provable() {
                         debug!("proving layer {:?}", op.describe());
                         measure::r_and_accumulate(

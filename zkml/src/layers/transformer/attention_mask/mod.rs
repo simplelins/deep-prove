@@ -330,6 +330,12 @@ where
         let unpadded_seq_len = *inputs[0].unpadded_shape().last().ok_or(anyhow::anyhow!(
             "Input shape must have at least one dimension"
         ))?;
+        // 行（q 轴）的 unpadded 尺寸：方形化网格 [rows_pad × rows_pad] 中
+        // 行 lt 的阈值；min 防御 rank-2/异常形状下行数大于列数的情况。
+        let unpadded_rows_len = inputs[0]
+            .unpadded_shape()
+            .dim(-2)
+            .min(unpadded_seq_len.next_power_of_two());
 
         ensure!(
             inputs.len() == 1,
@@ -345,8 +351,13 @@ where
         let mask_proving_data =
             MaskProvingData::from_claims_and_input(last_claims[0], &inputs[0].to_field())?;
 
-        let (proof, claims) =
-            self.prove_internal(ctx, mask_proving_data, unpadded_seq_len, prover)?;
+        let (proof, claims) = self.prove_internal(
+            ctx,
+            mask_proving_data,
+            unpadded_rows_len,
+            unpadded_seq_len,
+            prover,
+        )?;
         prover.push_proof(node_id, LayerProof::AttentionMask(proof));
         Ok(claims)
     }
@@ -390,10 +401,14 @@ where
             unpadded_input_shape,
         )?;
         let unpadded_seq_len = unpadded_input_shape.dim(-1);
+        let unpadded_rows_len = unpadded_input_shape
+            .dim(-2)
+            .min(unpadded_seq_len.next_power_of_two());
         self.op.verify_internal(
             proof,
             last_claims[0],
             mask_verifying_data,
+            unpadded_rows_len,
             unpadded_seq_len,
             verifier,
         )

@@ -61,6 +61,7 @@ impl AttentionMask<Element> {
         &self,
         _ctx: &AttentionMaskCtx,
         mask_proving_data: MaskProvingData<F>,
+        unpadded_rows_len: usize,
         unpadded_seq_len: usize,
         prover: &mut Prover<F, T, PCS>,
     ) -> Result<(AttentionMaskProof<F>, Vec<Claim<F>>)>
@@ -81,7 +82,20 @@ impl AttentionMask<Element> {
         // Since the mask is square the padded seq_len is just 1 << (num_vars >> 1)
         let mask_polys = &self.make_mask_polys(1 << (num_vars >> 1));
         // These polys are used so that the sumcheck only takes into account the portions of the mask poly corresponding to non-padded areas
-        let (row_lt_poly, column_lt_poly) = self.make_row_column_lt_polys::<F>(unpadded_seq_len);
+        let (row_lt_poly, column_lt_poly) = self.make_row_column_lt_polys::<F>(
+            unpadded_rows_len,
+            unpadded_seq_len,
+            1 << (num_vars >> 1),
+        );
+        #[cfg(feature = "alpha-debug-shapes")]
+        eprintln!(
+            "[mask-debug] input_shape={input_shape:?} unpadded_seq_len={unpadded_seq_len} eq_evals={} num_vars={num_vars} mask_vars={:?} lt_vars=({}, {}) input_raw_lens={:?}",
+            eq_poly.evals().len(),
+            mask_polys.iter().map(|p| p.num_vars()).collect::<Vec<_>>(),
+            row_lt_poly.num_vars(),
+            column_lt_poly.num_vars(),
+            input_polys.iter().map(|v| v.len()).collect::<Vec<_>>(),
+        );
 
         let input_polys = input_polys
             .into_iter()
@@ -244,15 +258,19 @@ impl AttentionMask<Element> {
     }
 
     /// Function to make the row and column less than polynomials for proving purposes
+    /// 网格为方形 [padded × padded]（见 `from_claims_and_input` 的方形化）：
+    /// row lt = [row < rows_unpadded]（按行重复的行模式）；
+    /// col lt = [col < cols_unpadded]（每行内的列模式——逐行重复）。
     fn make_row_column_lt_polys<F: PrimeField>(
         &self,
-        unpadded_seq_len: usize,
+        rows_unpadded: usize,
+        cols_unpadded: usize,
+        padded_seq_len: usize,
     ) -> (DensePolynomial<'_, F>, DensePolynomial<'_, F>) {
-        let padded_seq_len = unpadded_seq_len.next_power_of_two();
         // First we make the row less than evaluations
         let row_evals = (0..padded_seq_len)
             .map(|row_index| {
-                if row_index < unpadded_seq_len {
+                if row_index < rows_unpadded {
                     F::ONE
                 } else {
                     F::ZERO
@@ -262,12 +280,18 @@ impl AttentionMask<Element> {
             .take(padded_seq_len * padded_seq_len)
             .collect::<Vec<F>>();
 
-        // The column less than evaluations will be `unpadded_seq_len` rows of `padded_seq_len` ones followed by
-        // `(padded_seq_len - unpadded_seq_len)` rows of `padded_seq_len` zeros
-        let column_ones_count = unpadded_seq_len * padded_seq_len;
-        let column_zeros_count = (padded_seq_len - unpadded_seq_len) * padded_seq_len;
-        let column_evals = std::iter::repeat_n(F::ONE, column_ones_count)
-            .chain(std::iter::repeat_n(F::ZERO, column_zeros_count))
+        // The column less than evaluations: within each row the first
+        // `cols_unpadded` entries are one, the rest zero; repeated per row.
+        let column_evals = (0..padded_seq_len)
+            .flat_map(move |_| {
+                (0..padded_seq_len).map(move |col_index| {
+                    if col_index < cols_unpadded {
+                        F::ONE
+                    } else {
+                        F::ZERO
+                    }
+                })
+            })
             .collect::<Vec<F>>();
 
         (
@@ -319,13 +343,29 @@ impl<F: PrimeField> MaskProvingData<F> {
         let second_to_last_dim = unpadded_shape.dim(-2);
         let chunk_size = second_to_last_dim * final_dim;
 
+        // 方形化（α 矩形网格支持）：每片 [rows_unp, cols_unp] 补零至
+        // [rows_pad, rows_pad]，使 mask sumcheck 网格为方阵（seq = rows_pad）。
+        // cols 补零部分的数据为 0，对 eq 加权求和无影响。
+        let rows_pad = second_to_last_dim.next_power_of_two();
         let input_polys = unpadded_input
             .data()
             .chunks(chunk_size)
             .map(|chunk| {
                 let tensor =
                     Tensor::<F>::new(vec![second_to_last_dim, final_dim].into(), chunk.to_vec())?;
-                Ok(tensor.pad_next_power_of_two().into_data())
+                let padded = tensor.pad_next_power_of_two();
+                let cols_pad = padded.dim(1);
+                let mut data = padded.into_data();
+                if cols_pad != rows_pad {
+                    let mut square = Vec::with_capacity(rows_pad * rows_pad);
+                    for row in 0..rows_pad {
+                        let base = row * cols_pad;
+                        square.extend_from_slice(&data[base..base + cols_pad]);
+                        square.resize((row + 1) * rows_pad, F::ZERO);
+                    }
+                    data = square;
+                }
+                Ok(data)
             })
             .collect::<Result<Vec<Vec<F>>>>()?;
 
@@ -333,12 +373,17 @@ impl<F: PrimeField> MaskProvingData<F> {
         let dim_points = input_shape.split_point(claim.point())?;
 
         // Make the eq_poly evaluations from the points for the last two dimensions
-        let eq_point = dim_points[rank - 2..]
-            .iter()
-            .rev()
-            .flat_map(|p| *p)
-            .copied()
-            .collect::<Vec<F>>();
+        // 点序 = [cols 点, rows 点]（与既有 rev 顺序一致）。方形化后 cols 点
+        // 用零扩展到 rows 的变量数（补零列的数据为 0，扩展值不影响求和）。
+        let cols_point = dim_points[rank - 1];
+        let rows_point = dim_points[rank - 2];
+        let cols_vars = ceil_log2(input_shape.dim(-1).next_power_of_two());
+        let rows_vars = ceil_log2(input_shape.dim(-2).next_power_of_two());
+        let mut eq_point = cols_point.to_vec();
+        if cols_vars < rows_vars {
+            eq_point.resize(rows_vars, F::ZERO);
+        }
+        eq_point.extend(rows_point.iter().copied());
 
         let batching_challenges = dim_points[..rank - 2]
             .iter()
