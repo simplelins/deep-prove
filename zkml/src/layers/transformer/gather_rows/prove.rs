@@ -618,6 +618,33 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         Ok(())
     }
 
+    /// lambda 退化复现实验：多吸收 + 三连续采样的 XOF 行为
+    /// （e2e 失败 GKR 的 lambda = ~2^95，batching/alpha 正常 ~2^128）
+    #[test]
+    fn test_lambda_degeneracy_repro() {
+        use dp_crypto::arkyper::transcript::{Transcript, blake3::Blake3Transcript};
+        use ark_ff::PrimeField;
+        let bits = |f: &Fr| {
+            let big = f.into_bigint();
+            (big.as_ref().len() * 64) - big.as_ref().last().unwrap().leading_zeros() as usize
+        };
+        for absorbs in [1usize, 5, 20, 44, 100, 400] {
+            let mut t = Blake3Transcript::new(b"gkr");
+            for i in 0..absorbs {
+                t.append_bytes(&[(i as u8); 32]);
+            }
+            let c1 = t.challenge_scalar::<Fr>();
+            let c2 = t.challenge_scalar::<Fr>();
+            let c3 = t.challenge_scalar::<Fr>();
+            eprintln!(
+                "lambda-repro absorbs={absorbs}: c1_bits={} c2_bits={} c3_bits={}",
+                bits(&c1),
+                bits(&c2),
+                bits(&c3)
+            );
+        }
+    }
+
     /// 重数不变量：Σ mult = heads·q·w（每个输出 cell 恰好复制一个输入 cell）。
     #[test]
     fn test_score_window_multiplicity_invariant() {
@@ -1058,7 +1085,6 @@ impl GatherRowsCtx {
         );
         #[cfg(feature = "alpha-debug-shapes")]
         eprintln!("[alpha-shape] Rows gkr verify: node={id} lookup side begin");
-        #[cfg(feature = "alpha-debug-shapes")]
         let claim_l = {
             let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 new_verify_logup_proof_multiple_sizes(
@@ -1078,6 +1104,7 @@ impl GatherRowsCtx {
                             panic_payload.downcast_ref::<&str>().map(|s| s.to_string())
                         })
                         .unwrap_or_default();
+                    #[cfg(feature = "alpha-debug-shapes")]
                     for (ci, evals) in logup_proof_lookup.circuit_outputs().iter().enumerate() {
                         let vals: Vec<String> = evals
                             .iter()
