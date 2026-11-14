@@ -223,6 +223,14 @@ impl<F: PrimeField, PCS: CommitmentScheme> CommitmentProver<F, PCS> {
 
         let sumcheck_expression = build_sumcheck_expression(batching_coeffs_per_poly)?;
 
+        // eq 多项式按 claim 点长构建，可能超过 committed 多项式的自然变量数
+        // （claims 链的 padded 网格点）。max_num_vars 必须覆盖它们，否则
+        // zero_pad_num_vars 会因 max < eq 变量数而失败
+        // （e2e v11 Chunk(12) 实锤：max=21 vs eq=22）。
+        for eq in &eq_polys {
+            max_num_vars = max_num_vars.max(eq.num_vars());
+        }
+
         let poly_views = committed_polys
             .iter()
             .chain(&eq_polys)
