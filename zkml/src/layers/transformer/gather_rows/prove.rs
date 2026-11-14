@@ -183,6 +183,7 @@ pub fn build_score_window_logup_inputs<F: PrimeField>(
     w: usize,
     q: usize,
     s: usize,
+    s_unpadded: usize,
     heads: usize,
     constant_challenge: F,
     column_separation_challenge: F,
@@ -192,9 +193,11 @@ pub fn build_score_window_logup_inputs<F: PrimeField>(
     let cells = scores_flat.len();
     let t_len = heads * q * w;
     ensure!(cells.is_power_of_two() && t_len.is_power_of_two());
-    // clamp 用 unpadded s（源张量的真实 key 轴长），网格/stride 用 padded s
-    let s_unpadded = s;
-    let s = s; // s 即 padded 网格（调用方保证 scores_flat 已按 padded grid 展开）
+    // clamp 用 unpadded s（源张量的真实 key 轴长），网格/stride 用 padded s。
+    // 二者必须区分：s 非 2 的幂时 padded 查询行的窗口 clamp 会采到
+    // padded 行（j = s_pad-1），而闭式校验用真实 unpadded 钳位——
+    // 不一致会导致 GKR 索引列与闭式映射 mismatch（e2e v10 N10 实锤）。
+    let _ = s;
 
     // 查询侧：out[t] = in[cell(t)] 的 value 列 + 闭式 cell-id 列
     let mut lookup_cols = vec![Vec::with_capacity(t_len); 2];
@@ -293,7 +296,7 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
         let _: Fr = t_verify.challenge_scalar();
 
         let (lookup_input, table_input) =
-            build_score_window_logup_inputs(&scores, w, q, s, heads, cc, csc)?;
+            build_score_window_logup_inputs(&scores, w, q, s, s, heads, cc, csc)?;
         let proof_l = new_batch_multiple_sizes_prove(&[lookup_input], &mut t_prove)?;
         let proof_t = new_batch_multiple_sizes_prove(&[table_input], &mut t_prove)?;
 
@@ -347,7 +350,7 @@ use crate::lookup::logup_gkr::prover::new_batch_multiple_sizes_prove;
 
         // 腐化查询侧：构建后翻转一个复制的 value（表侧保持原值）
         let (mut lookup_input, table_input) =
-            build_score_window_logup_inputs(&scores, w, q, s, heads, cc, csc).unwrap();
+            build_score_window_logup_inputs(&scores, w, q, s, s, heads, cc, csc).unwrap();
         let corrupted = match &mut lookup_input {
             LogUpInput::Lookup { column_evals, .. } => {
                 column_evals[0][5] += Fr::from(1u64);
@@ -1411,6 +1414,7 @@ impl GatherRowsCtx {
             w,
             q_pad,
             s_pad,
+            s,
             heads,
             constant_challenge,
             column_separation_challenge,

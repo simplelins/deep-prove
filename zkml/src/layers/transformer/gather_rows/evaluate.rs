@@ -66,11 +66,16 @@ impl GatherRows {
         );
 
         // 闭式索引 [q, w]（i64），扩展到 [L, q, w]
+        // clamp 用 unpadded s（真实 key 轴长）——与 score_window_source_cell
+        // 及 GKR 闭式校验一致；unpadded ≤ padded，burn gather 仍在界内。
+        // （此前用 padded s：s 非 2 的幂时 padded 查询行的窗口映射与
+        // GKR/闭式校验分叉——e2e v10 N10 实锤。）
+        let s_unpadded = *unpadded_dims.last().unwrap_or(&s);
         let idx_vec: Vec<i64> = (0..q * w)
             .map(|t| {
                 let i = t / w;
                 let off = t % w;
-                (i as i64 - (w as i64 - 1) + off as i64).clamp(0, s as i64 - 1)
+                (i as i64 - (w as i64 - 1) + off as i64).clamp(0, s_unpadded as i64 - 1)
             })
             .collect();
         let device = in3.device();
