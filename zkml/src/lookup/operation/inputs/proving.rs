@@ -329,6 +329,26 @@ mod test_utils {
                 total_sum += chunk_sum_part * batching_challenges[0];
             }
             if total_output != last_claim.evaluation() {
+                // P1 误差结构探针：冻结 witness 的输出列（mles[1] = output col）
+                // 在 claim 点直接求值 vs 收到的 claim——误差若 = padding_value
+                // × eq_sum 结构即 padding 修正 bug；若随机即数据污染。
+                if mles.len() >= 2 {
+                    match mles[1].evaluate(last_claim.point()) {
+                        Ok(expected) => {
+                            let diff = expected - last_claim.evaluation();
+                            eprintln!(
+                                "[p1-errstruct] table={} expected_witness_out={:?} claim={:?} diff={:?} diff_bits={}",
+                                chunking_info.table().name(),
+                                expected.into_bigint(),
+                                last_claim.evaluation().into_bigint(),
+                                diff.into_bigint(),
+                                (diff.into_bigint().as_ref().len() * 64)
+                                    - diff.into_bigint().as_ref().last().unwrap().leading_zeros() as usize
+                            );
+                        }
+                        Err(e) => eprintln!("[p1-errstruct] eval failed: {e}"),
+                    }
+                }
                 // P1：witness 输出列指纹（跨轮对比——稳定 = claim 链问题）
                 let wit_hash = mles
                     .first()
