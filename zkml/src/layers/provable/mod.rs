@@ -941,6 +941,16 @@ impl<F: PrimeField, PCS: CommitmentScheme<Field = F>> VerifiableCtx<F, PCS> for 
                 node_id,
                 chunk_number,
             ),
+            (LayerCtx::GatherRows(gather_ctx), LayerProof::GatherRows(proof)) => {
+                gather_ctx.verify_chunk(
+                    proof,
+                    last_claims,
+                    verifier,
+                    shape_step,
+                    node_id,
+                    chunk_number,
+                )
+            }
             (LayerCtx::Split(split_ctx), LayerProof::SplitLayer(proof)) => split_ctx.verify_chunk(
                 proof,
                 last_claims,
@@ -1055,6 +1065,9 @@ impl<F: PrimeField, PCS: CommitmentScheme<Field = F>> VerifiableCtx<F, PCS> for 
                 write_proof_to_transcript::<F, PCS, _, _>(ctx, p, transcript)
             }
             (LayerCtx::AttentionMask(ctx), LayerProof::AttentionMask(p)) => {
+                write_proof_to_transcript::<F, PCS, _, _>(ctx, p, transcript)
+            }
+            (LayerCtx::GatherRows(ctx), LayerProof::GatherRows(p)) => {
                 write_proof_to_transcript::<F, PCS, _, _>(ctx, p, transcript)
             }
             (LayerCtx::EinSum(ctx), LayerProof::EinSum(p)) => {
