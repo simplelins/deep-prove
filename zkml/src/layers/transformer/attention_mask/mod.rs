@@ -332,10 +332,10 @@ where
         ))?;
         // 行（q 轴）的 unpadded 尺寸：方形化网格 [rows_pad × rows_pad] 中
         // 行 lt 的阈值；min 防御 rank-2/异常形状下行数大于列数的情况。
-        let unpadded_rows_len = inputs[0]
-            .unpadded_shape()
-            .dim(-2)
-            .min(unpadded_seq_len.next_power_of_two());
+        // 行（q 轴）的 unpadded 尺寸：矩形网格行 lt 的阈值。
+        // 不做 min 截断——角掩码 [4, 1023, 512] 的 rows_unp=1023 > cols_pad=512
+        // 是合法状态（截断会把行 lt 错成 [row < 512]）。
+        let unpadded_rows_len = inputs[0].unpadded_shape().dim(-2);
 
         ensure!(
             inputs.len() == 1,
@@ -401,9 +401,7 @@ where
             unpadded_input_shape,
         )?;
         let unpadded_seq_len = unpadded_input_shape.dim(-1);
-        let unpadded_rows_len = unpadded_input_shape
-            .dim(-2)
-            .min(unpadded_seq_len.next_power_of_two());
+        let unpadded_rows_len = unpadded_input_shape.dim(-2);
         let cols_pad = input_shape.dim(-1);
         self.op.verify_internal(
             proof,

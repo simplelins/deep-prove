@@ -1676,7 +1676,10 @@ impl GatherRowsCtx {
                 .output_claims()
                 .get(dk + 1)
                 .ok_or_else(|| anyhow::anyhow!("missing table index claim"))?;
-            let table_index: Vec<F> = (0..heads * s).map(|r| F::from(r as u64)).collect();
+            // 表索引列与 build_gather_logup_inputs 一致：j ∈ [0, rows_pad)。
+            // 此前用 (0..heads*s)（unpadded）——s 非 2 幂时长度非 pow2，
+            // into_mle 的 pow2 assert 以裸数字 panic（e2e v15 实锤 "1023"）。
+            let table_index: Vec<F> = (0..rows_pad).map(|r| F::from(r as u64)).collect();
             let expected_t = table_index.into_mle().evaluate(idx_claim_t.point())?;
             ensure!(
                 expected_t == idx_claim_t.evaluation(),
