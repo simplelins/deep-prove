@@ -404,12 +404,14 @@ where
         let unpadded_rows_len = unpadded_input_shape
             .dim(-2)
             .min(unpadded_seq_len.next_power_of_two());
+        let cols_pad = input_shape.dim(-1);
         self.op.verify_internal(
             proof,
             last_claims[0],
             mask_verifying_data,
             unpadded_rows_len,
             unpadded_seq_len,
+            cols_pad,
             verifier,
         )
     }

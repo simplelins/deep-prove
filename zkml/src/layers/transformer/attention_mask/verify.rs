@@ -21,6 +21,7 @@ impl AttentionMask<Element> {
         mask_verifying_data: MaskVerifyingData<F>,
         unpadded_rows_len: usize,
         unpadded_seq_len: usize,
+        cols_pad: usize,
         verifier: &mut Verifier<F, T, PCS>,
     ) -> Result<Vec<Claim<F>>>
     where
@@ -41,7 +42,15 @@ impl AttentionMask<Element> {
         } = mask_verifying_data;
 
         let num_vars = eq_point.len();
-        let additional_mask_poly = local_mask_proof.is_some();
+        // decomposed 与否由 span 与网格尺寸决定（与 prover 的
+        // make_mask_polys 判据一致：Local(n) 且 n < rows_pad 时分解）；
+        // band 多项式的求值用闭式核对（evaluations[0]），不再依赖子 GKR。
+        let row_vars = num_vars - ceil_log2(cols_pad);
+        let rows_pad = 1usize << row_vars;
+        let additional_mask_poly = match &self.span {
+            AttentionSpan::Local(n) => *n < rows_pad,
+            _ => false,
+        };
         let max_degree = if additional_mask_poly {
             ensure!(
                 self.is_local_mask(),
@@ -51,6 +60,7 @@ impl AttentionMask<Element> {
         } else {
             5
         };
+        let _ = local_mask_proof;
         let aux_info = VPAuxInfo {
             max_degree,
             max_num_variables: num_vars,
@@ -64,21 +74,29 @@ impl AttentionMask<Element> {
         );
         let sumcheck_point = &subclaim.point;
 
-        let dim_vars = num_vars >> 1;
+        // 矩形拆分：点 = [cols 位, rows 位]（LSB-first），cols 位数 = log2(cols_pad)
+        let dim_vars = ceil_log2(cols_pad);
         let eq_eval = eq_eval(sumcheck_point, &eq_point);
 
         let (column_point, row_point) = sumcheck_point.split_at(dim_vars);
 
-        let mut mask_eval = eval_zeroifier_mle(column_point, row_point);
+        let mut mask_eval = crate::eval_row_ge_col_mle(row_point, column_point);
         if additional_mask_poly {
-            mask_eval *= evaluations[0]; // in this case, the first evaluation is for the additional mask polynomial
-            self.verify_additional_mask_poly_eval(
-                row_point,
-                column_point,
+            // band 多项式 [row < col + n] 的求值用闭式核对（矩形网格下
+            // U·S+P 分解不再适用）：prover 上报的 evaluations[0] 必须等于
+            // 闭式值——sumcheck 已通过主证明绑定该求值，此处闭式核对
+            // 替代原 local 子 GKR。
+            let AttentionSpan::Local(window) = self.span else {
+                Err(anyhow!("Found sumcheck proof for local mask with a full attention mask"))?
+            };
+            let local_eval = crate::eval_band_mle(row_point, column_point, window);
+            ensure!(
+                evaluations[0] == local_eval,
+                "Local mask poly evaluation {} does not match the closed form {}",
                 evaluations[0],
-                local_mask_proof.as_ref().unwrap(),
-                verifier,
-            )?;
+                local_eval
+            );
+            mask_eval *= evaluations[0];
         }
 
         let input_evals = &evaluations[additional_mask_poly as usize..];
@@ -130,87 +148,14 @@ impl AttentionMask<Element> {
         unpadded_rows_len: usize,
         unpadded_seq_len: usize,
     ) -> Result<(F, F)> {
-        // 方形化网格（见 prove 侧 from_claims_and_input）：两侧点长相同 =
-        // 方形边长的 bit 数。阈值分别取行/列的 unpadded 尺寸。
-        let bit_len = row_point.len();
-        ensure!(
-            column_point.len() == bit_len,
-            "Column point length {} does not match row point length {bit_len}",
-            column_point.len(),
-        );
-        let rows_bits = to_bit_sequence_le(unpadded_rows_len - 1, bit_len)
-            .map(|b| F::from(b as u64))
-            .collect::<Vec<F>>();
-        let cols_bits = to_bit_sequence_le(unpadded_seq_len - 1, bit_len)
-            .map(|b| F::from(b as u64))
-            .collect::<Vec<F>>();
-        let row_eval = eval_zeroifier_mle(row_point, &rows_bits);
-        let column_eval = eval_zeroifier_mle(column_point, &cols_bits);
+        // 索引 lt 的闭式：[row < rows_unp]、[col < cols_unp]——直接前缀和，
+        // 无位序歧义（to_bit_sequence_le 是 LSB-first 而 eval_zeroifier_mle
+        // 按值 MSB-first 比较，混用会错，e2e/单测实锤）。
+        let row_eval = crate::eval_lt_index_mle(row_point, unpadded_rows_len);
+        let column_eval = crate::eval_lt_index_mle(column_point, unpadded_seq_len);
         Ok((row_eval, column_eval))
     }
 
-    fn verify_additional_mask_poly_eval<F, T, PCS>(
-        &self,
-        row_point: &[F],
-        column_point: &[F],
-        eval: F,
-        local_mask_proof: &IOPProof<F>,
-        verifier: &mut Verifier<F, T, PCS>,
-    ) -> anyhow::Result<()>
-    where
-        F: PrimeField,
-        PCS: CommitmentScheme,
-        T: Transcript,
-    {
-        let AttentionSpan::Local(window) = self.span else {
-            Err(anyhow!("Found sumcheck proof for full attention mask"))?
-        };
-        let num_row_vars = row_point.len();
-        let seq_len = 1usize << num_row_vars;
-        ensure!(
-            window < seq_len,
-            "Sliding window not smaller than sequence length"
-        );
-
-        let num_col_vars = column_point.len();
-        // compute the evaluation for the padding polynomial, i.e., the polynomial P[i,j] = 1 iff j >= seq_len - window
-        let pad_col_bits = to_bit_sequence_le(seq_len - window, num_col_vars)
-            .map(|b| F::from(b as u64))
-            .collect_vec();
-        let padded_eval = F::ONE - eval_zeroifier_mle(column_point, &pad_col_bits);
-
-        let aux_info = VPAuxInfo {
-            max_degree: 2,
-            max_num_variables: num_col_vars,
-            ..Default::default()
-        };
-        let subclaim = IOPVerifierState::<F>::verify(
-            eval - padded_eval,
-            local_mask_proof,
-            &aux_info,
-            verifier.transcript,
-        );
-
-        let sumcheck_point = &subclaim.point;
-
-        // evaluation for the upper diagonal MLE produced by the sumcheck. The evaluation is computed
-        // using the formula for the lower trianfular MLE, but swapping the row point with the
-        // column point (i.e., the ones given by sumcheck challenges)
-        let upper_eval = eval_zeroifier_mle(row_point, sumcheck_point);
-
-        // evaluation for the shift matrix MLE
-        let shift_eval = eval_shift_matrix(sumcheck_point, column_point, window - 1);
-
-        let calc_eval = upper_eval * shift_eval;
-        ensure!(
-            calc_eval == subclaim.expected_evaluation,
-            "Mask sumcheck verification failed, expected evaluation {:?} got {:?}",
-            subclaim.expected_evaluation,
-            calc_eval
-        );
-
-        Ok(())
-    }
 }
 
 /// Compute the evaluation for the MLE of a square shift matrix S for the given `shift` at the row and column points
@@ -270,17 +215,13 @@ impl<F: PrimeField> MaskVerifyingData<F> {
         let dim_points = input_shape.split_point(claim.point())?;
 
         // Make the eq_poly evaluations from the points for the last two dimensions
-        // 点序 = [cols 点, rows 点]；方形化（见 prove 侧）后 cols 点用零扩展
-        // 到 rows 的变量数，与 prover 的构造完全一致。
-        let cols_point = dim_points[rank - 1];
-        let rows_point = dim_points[rank - 2];
-        let cols_vars = ceil_log2(input_shape.dim(-1).next_power_of_two());
-        let rows_vars = ceil_log2(input_shape.dim(-2).next_power_of_two());
-        let mut eq_point = cols_point.to_vec();
-        if cols_vars < rows_vars {
-            eq_point.resize(rows_vars, F::ZERO);
-        }
-        eq_point.extend(rows_point.iter().copied());
+        // 点序 = [cols 点, rows 点]（矩形网格下不扩展，与 prover 一致）。
+        let eq_point = dim_points[rank - 2..]
+            .iter()
+            .rev()
+            .flat_map(|p| *p)
+            .copied()
+            .collect::<Vec<F>>();
 
         let batching_challenges = dim_points[..rank - 2]
             .iter()

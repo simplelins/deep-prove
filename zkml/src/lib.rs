@@ -124,6 +124,59 @@ pub fn get_root_of_unity<F: PrimeField>(n: usize) -> anyhow::Result<F> {
     F::get_root_of_unity(1 << n as u64).ok_or(anyhow!("Cannot compute 2^{n}-th root of unity"))
 }
 
+/// Evaluate the MLE of a rectangular "row ≥ col" zeroifier over the split points.
+/// Row indices live over `row_point` (2^len bits), column indices over `col_point`.
+/// Generalises the square-only [`eval_zeroifier_mle`]:
+/// eval = Σ_c eq_col(c) · Σ_{row ≥ c} eq_row(row).
+pub fn eval_row_ge_col_mle<F: PrimeField>(row_point: &[F], col_point: &[F]) -> F {
+    let row_eqs = dp_crypto::poly::eq::evals(row_point);
+    let col_eqs = dp_crypto::poly::eq::evals(col_point);
+    // 行 eq 的后缀和 S(t) = Σ_{row ≥ t} eq_row(row)
+    let mut suffix = vec![F::ZERO; row_eqs.len() + 1];
+    for (i, v) in row_eqs.iter().enumerate().rev() {
+        suffix[i] = suffix[i + 1] + *v;
+    }
+    col_eqs
+        .iter()
+        .take(suffix.len())
+        .zip(suffix.iter())
+        .fold(F::ZERO, |acc, (&c, &s)| acc + c * s)
+}
+
+/// Evaluate the MLE of the index indicator "index < threshold" over `point`.
+/// eval = Σ_{v < threshold} eq(v),语义无位序歧义。
+pub fn eval_lt_index_mle<F: PrimeField>(point: &[F], threshold: usize) -> F {
+    let eqs = dp_crypto::poly::eq::evals(point);
+    eqs.iter()
+        .take(threshold.min(eqs.len()))
+        .fold(F::ZERO, |acc, &v| acc + v)
+}
+
+/// Evaluate the MLE of a rectangular band "row < col + n" over the split points.
+/// eval = Σ_c eq_col(c) · Σ_{row < c+n} eq_row(row)。
+pub fn eval_band_mle<F: PrimeField>(row_point: &[F], col_point: &[F], n: usize) -> F {
+    let row_eqs = dp_crypto::poly::eq::evals(row_point);
+    let col_eqs = dp_crypto::poly::eq::evals(col_point);
+    // 行 eq 的前缀和 P(t) = Σ_{row ≤ t} eq_row(row)（含端点）
+    let mut prefix = vec![F::ZERO; row_eqs.len()];
+    let mut acc = F::ZERO;
+    for (i, v) in row_eqs.iter().enumerate() {
+        acc += *v;
+        prefix[i] = acc;
+    }
+    col_eqs
+        .iter()
+        .enumerate()
+        .fold(F::ZERO, |sum, (c, &c_eq)| {
+            let last = (c + n).min(row_eqs.len());
+            if last == 0 {
+                sum
+            } else {
+                sum + c_eq * prefix[last - 1]
+            }
+        })
+}
+
 /// Method to efficiency evaluate the MLE of the zeroifier matrix over a random
 /// point. The point is provided already split between coordinates referring to the
 /// columns and coordinates referring to the rows of the matrix.
@@ -302,6 +355,64 @@ pub fn seed_from_env_or_rng() -> u64 {
 
 #[cfg(test)]
 mod test {
+    #[test]
+    fn test_dense_var_order_probe() {
+        use ark_bn254::Fr;
+        use dp_crypto::poly::dense::DensePolynomial;
+        // poly = 指示函数 δ_{index=1}
+        let mle = DensePolynomial::new(vec![
+            Fr::from(0u64),
+            Fr::from(1u64),
+            Fr::from(0u64),
+            Fr::from(0u64),
+        ]);
+        let r = vec![Fr::from(3u64), Fr::from(5u64)];
+        let e = mle.evaluate(&r).unwrap();
+        // 约定 A：变量0 ↔ 索引 MSB → 索引1 = (x0=0,x1=1) → (1−r0)·r1
+        let a = (<Fr as ark_ff::AdditiveGroup>::ZERO - r[0]) * r[1];
+        // 约定 B：变量0 ↔ 索引 LSB → 索引1 = (x0=1,x1=0) → r0·(1−r1)
+        let b = r[0] * (<Fr as ark_ff::AdditiveGroup>::ZERO - r[1]);
+        eprintln!("eval={:?} convA_msb={:?} convB_lsb={:?}", e, a, b);
+        // 手工 Σ eq(r,i)·z[i]，eq 用 dp-crypto evals（r[0] ↔ 索引 MSB）
+        let chis = dp_crypto::poly::eq::evals(&r);
+        let zero = Fr::from(0u64);
+        let manual: Fr = chis
+            .iter()
+            .zip(mle.evals())
+            .map(|(c, z)| *c * z)
+            .reduce(|a, b| a + b)
+            .unwrap_or(zero);
+        eprintln!("manual_dot={:?} matches_eval={}", manual, manual == e);
+        // 约定 B 修正版：r0·(1−r1)
+        let b2 = r[0] * (Fr::from(1u64) - r[1]);
+        eprintln!("convB2={:?}", b2);
+    }
+
+    #[test]
+    fn test_eq_convention_probe() {
+        use ark_bn254::Fr;
+        use ark_ff::{AdditiveGroup, PrimeField};
+        use dp_crypto::poly::eq::evals;
+        // 4x4 grid: poly[row*4+col] = [row >= col]
+        let mut poly = vec![Fr::ZERO; 16];
+        for row in 0..4usize {
+            for col in 0..4usize {
+                poly[row * 4 + col] = if row >= col { Fr::from(1u64) } else { Fr::from(0u64) };
+            }
+        }
+        let mle = dp_crypto::poly::dense::DensePolynomial::new(poly);
+        let r_row = vec![Fr::from(2u64), Fr::from(0u64)];
+        let r_col = vec![Fr::from(1u64), Fr::from(1u64)];
+        let point = [r_col.clone(), r_row.clone()].concat();
+        let true_eval = mle.evaluate(&point).unwrap();
+        let old = crate::eval_zeroifier_mle(&r_col, &r_row);
+        let new = crate::eval_row_ge_col_mle(&r_row, &r_col);
+        let new_swapped = crate::eval_row_ge_col_mle(&r_col, &r_row);
+        eprintln!("true={:?} old={:?} new={:?} new_swapped={:?}", true_eval, old, new, new_swapped);
+        assert_eq!(true_eval, old, "old fold (col,row)");
+        assert_eq!(true_eval, new, "suffix(row,col)");
+    }
+
     use ark_std::rand::Rng;
     use dp_crypto::{IntoMLE, arkyper::transcript::blake3::Blake3Transcript};
     use itertools::Itertools;
