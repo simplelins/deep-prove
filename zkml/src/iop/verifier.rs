@@ -435,27 +435,47 @@ impl<'a, F: PrimeField, T: Transcript, PCS: CommitmentScheme<Field = F>> Verifie
 
                         let my_claims = {
                             if layer.is_provable() {
-                                if let ChunkedNode::ChunkedLayer(chunked_layer) = inner_node {
-                                    layer.verify_chunk(
-                                        node_proof,
-                                        &claims_for_verify.iter().collect_vec(),
-                                        &mut self,
-                                        shape_step,
-                                        node_id,
-                                        chunked_layer.chunk_number,
-                                    )
-                                } else {
-                                    layer
-                                        .verify(
-                                            node_proof,
-                                            &claims_for_verify.iter().collect_vec(),
-                                            &mut self,
-                                            shape_step,
-                                            node_id,
-                                        )
-                                }.with_context(|| format!(
-                                    "Verification failed for node with ID {node_id}: {}",layer.describe()
-                                ))?
+                                // per-node catch_unwind：sumcheck 内部 panic 不带
+                                // 节点上下文，包一层让错误链带上 node id（streaming
+                                // verify 的外层 catch 只能看到裸 payload，无法定位）
+                                let node_verify = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        if let ChunkedNode::ChunkedLayer(chunked_layer) = inner_node {
+                                            layer.verify_chunk(
+                                                node_proof,
+                                                &claims_for_verify.iter().collect_vec(),
+                                                &mut self,
+                                                shape_step,
+                                                node_id,
+                                                chunked_layer.chunk_number,
+                                            )
+                                        } else {
+                                            layer.verify(
+                                                node_proof,
+                                                &claims_for_verify.iter().collect_vec(),
+                                                &mut self,
+                                                shape_step,
+                                                node_id,
+                                            )
+                                        }
+                                    }),
+                                );
+                                match node_verify {
+                                    Ok(r) => r.with_context(|| format!(
+                                        "Verification failed for node with ID {node_id}: {}", layer.describe()
+                                    ))?,
+                                    Err(payload) => {
+                                        let msg = payload
+                                            .downcast_ref::<&str>()
+                                            .map(|s| (*s).to_string())
+                                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                                            .unwrap_or_else(|| "unknown panic".to_string());
+                                        anyhow::bail!(
+                                            "Verification panicked for node with ID {node_id}: {}: {msg}",
+                                            layer.describe()
+                                        );
+                                    }
+                                }
                             } else {
                                 // we only propagate the claims, without
                                 // changing them, as a non-provable layer
