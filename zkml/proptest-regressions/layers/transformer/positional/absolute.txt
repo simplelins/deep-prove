@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 22273c8f2ee2379d1006bfbba978c8cef09db66d08bde7bd60849c9d5ab4969e # shrinks to input = AbsoluteInput { seq_len: 5, embedding_size: 56, context_length: 50, .. }

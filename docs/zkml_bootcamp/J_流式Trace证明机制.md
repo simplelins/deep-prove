@@ -2,20 +2,20 @@
 
 ## 文档控制
 
-| 项目 | 内容 |
-| --- | --- |
-| 文档编号 | J |
-| 所属系列 | zkml_bootcamp |
-| 版本 | 1.0 |
-| 发布日期 | 2026-10-30 |
-| 文档状态 | 已发布 |
+| 项目         | 内容                                                                                                                                                                                                                                                              |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 文档编号     | J                                                                                                                                                                                                                                                                 |
+| 所属系列     | zkml_bootcamp                                                                                                                                                                                                                                                     |
+| 版本         | 1.0                                                                                                                                                                                                                                                               |
+| 发布日期     | 2026-10-30                                                                                                                                                                                                                                                        |
+| 文档状态     | 已发布                                                                                                                                                                                                                                                            |
 | 适用代码基线 | `zkml/src/iop/streaming.rs`、`zkml/src/iop/chunking.rs`、`zkml/src/model/mod.rs`（`run_and_prove_streaming`）、`zkml/src/model/llm.rs`（`Driver::prove_streaming` / `verify_streaming`）、`zkml/src/iop/verifier.rs`、`tenstore/src/metrics.rs` |
 
 ### 修订记录
 
-| 版本 | 日期 | 修订说明 |
-| --- | --- | --- |
-| 1.0 | 2026-10-30 | 首次发布：预算驱动切分、段完成检测与内存 pin、双执行模式（同步/流水线）、方案 A 种子链、FPGA/ASIC 对接接口契约、验收数据 |
+| 版本 | 日期       | 修订说明                                                                                                                 |
+| ---- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 1.0  | 2026-10-30 | 首次发布：预算驱动切分、段完成检测与内存 pin、双执行模式（同步/流水线）、方案 A 种子链、FPGA/ASIC 对接接口契约、验收数据 |
 
 ---
 
@@ -31,14 +31,14 @@
 
 ### 1.3 与经典路径的对照
 
-| 维度 | 经典路径（I 文档） | 流式路径（本文档） |
-| --- | --- | --- |
-| trace 生命周期 | heavy run 一次生成全量 → 全量证明 | 分段生成，段证明后即释放 |
-| 磁盘依赖 | prove 阶段按需从 store 重载（LRU 未命中读盘） | prove 全程 `disk_reads = 0`（pin 保证内存命中；store 写盘仅兜底） |
-| 峰值内存 | 全量 trace + 证明工作集 | 窗口内段 × 预算 + 单段证明工作集 |
-| 挑战派生 | 全局单挑战，各 chunk 共享 | 方案 A：串行种子链（K 文档 §5），验证入口 `verify_streaming` |
-| 验证器 | `verify` | `verify_streaming`（业务校验共享） |
-| 切分粒度 | 按模型结构（Add 节点 / 水平切分） | 内存预算驱动（一期仅垂直切分） |
+| 维度           | 经典路径（I 文档）                            | 流式路径（本文档）                                                  |
+| -------------- | --------------------------------------------- | ------------------------------------------------------------------- |
+| trace 生命周期 | heavy run 一次生成全量 → 全量证明            | 分段生成，段证明后即释放                                            |
+| 磁盘依赖       | prove 阶段按需从 store 重载（LRU 未命中读盘） | prove 全程 `disk_reads = 0`（pin 保证内存命中；store 写盘仅兜底） |
+| 峰值内存       | 全量 trace + 证明工作集                       | 窗口内段 × 预算 + 单段证明工作集                                   |
+| 挑战派生       | 全局单挑战，各 chunk 共享                     | 方案 A：串行种子链（K 文档 §5），验证入口 `verify_streaming`     |
+| 验证器         | `verify`                                    | `verify_streaming`（业务校验共享）                                |
+| 切分粒度       | 按模型结构（Add 节点 / 水平切分）             | 内存预算驱动（一期仅垂直切分）                                      |
 
 ---
 
@@ -94,9 +94,9 @@
 
 ### 3.4 双执行模式（StreamingMode）
 
-| 模式 | 行为 | 适用 |
-| --- | --- | --- |
-| `Sync` | run 循环在段完成点阻塞，spawn 专用大栈线程（64MB）就地证明，join 后释放 pin | 最小内存形态；调试基线 |
+| 模式                    | 行为                                                                                                                             | 适用                                |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| `Sync`                | run 循环在段完成点阻塞，spawn 专用大栈线程（64MB）就地证明，join 后释放 pin                                                      | 最小内存形态；调试基线              |
 | `Pipeline { window }` | 常驻证明线程（64MB 栈）从有界通道（容量 window）FIFO 取段证明；run 循环投递后继续生成；通道满即背压阻塞（持 pin 等待，内存有界） | 性能形态；总时间 ≈ max(生成, 证明) |
 
 两模式共用：切分/pin/子 trace/种子链/合并。`Pipeline` 模式下段证明完成经 `release_tx → take_released()` 通道通知 run 循环释放 pin。
@@ -114,6 +114,7 @@
 ### 3.6 证明线程
 
 专用线程 `PROVE_THREAD_STACK_SIZE = 64MB`：
+
 - sumcheck/expression 求值与大型结构递归 drop 需要的栈深超过小栈线程（如 libtest 2MB）所能提供；显式大栈使证明与调用方线程栈无关。
 - 该线程即 FPGA 桥接的软件参考形态（§5）。
 
@@ -145,13 +146,13 @@ prove_streaming(ctx, input_tensor(完整生成句子), budget, mode, store)
 
 流式路径把证明端隔离在一个串行会话内，加速器只需实现"段进→证明出"。对接形态（软件参考实现即 `pipeline_prover_thread`）：
 
-| 阶段 | 方向 | 载荷 | 说明 |
-| --- | --- | --- | --- |
-| 会话建立 | 主机→加速器 | setup 摘要（PCS 参数标识）、seed₀ | 加速器据此初始化段 transcript |
-| 段投递 | 主机→加速器 | `(chunk_id, chunk 结构[可序列化 ModelChunk], 段张量数据, seed_i)` | `ModelChunk`、`Trace`、`ChunkProverInput` 均 `Serialize`；张量数据 = 段内全部 handle 的（storage_key, shape, 元素数组） |
-| 段证明 | 加速器内 | — | 与软件 `prove_chunk` 协议一致（阶段 2-9，I 文档 §5.2） |
-| 段回传 | 加速器→主机 | 序列化 `ChunkProof` | 主机随即：①吸收种子链派生 seed_{i+1}（`SeedChain::absorb`，主机侧函数）；②通知释放该段内存 |
-| 会话收尾 | 主机→加速器 | 结束标记 | 全部段完成后合并 `Vec<ChunkProof> → Proof`（完成序） |
+| 阶段     | 方向         | 载荷                                                                | 说明                                                                                                                            |
+| -------- | ------------ | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 会话建立 | 主机→加速器 | setup 摘要（PCS 参数标识）、seed₀                                  | 加速器据此初始化段 transcript                                                                                                   |
+| 段投递   | 主机→加速器 | `(chunk_id, chunk 结构[可序列化 ModelChunk], 段张量数据, seed_i)` | `ModelChunk`、`Trace`、`ChunkProverInput` 均 `Serialize`；张量数据 = 段内全部 handle 的（storage_key, shape, 元素数组） |
+| 段证明   | 加速器内     | —                                                                  | 与软件 `prove_chunk` 协议一致（阶段 2-9，I 文档 §5.2）                                                                       |
+| 段回传   | 加速器→主机 | 序列化 `ChunkProof`                                               | 主机随即：①吸收种子链派生 seed_{i+1}（`SeedChain::absorb`，主机侧函数）；②通知释放该段内存                                  |
+| 会话收尾 | 主机→加速器 | 结束标记                                                            | 全部段完成后合并 `Vec<ChunkProof> → Proof`（完成序）                                                                         |
 
 **顺序约束**：段必须按**完成顺序**串行投递（seed 链依赖前段证明产物）；段内 sumcheck 的 rayon 并行不受影响。**信任边界**：加速器完全不受信——其产出必须通过 `verify_streaming`；验收即"加速器证明被软件验证器接受"。
 
@@ -161,29 +162,29 @@ prove_streaming(ctx, input_tensor(完整生成句子), budget, mode, store)
 
 ## 6 设计约束与不变式
 
-| 编号 | 不变式 | 依据 |
-| --- | --- | --- |
-| INV-S1 | pin 独立于 usage 计数；dry 条件 = usage==0 且 pin==0 | HandleLifetimeRunner 三个 dry 点统一检查 |
-| INV-S2 | 段的 key 集合（pin 集合）在运行前即可从图结构完全确定 | 节点入边 source ∪ 出边 port 的 storage_key；proving data 永不 dry |
-| INV-S3 | 段吸收顺序 = 完成顺序 = `Proof.chunk_proofs` Vec 顺序 | 种子链正确性（方案 A）；verifier 按 Vec 序重放 |
-| INV-S4 | 段证明在专用大栈线程执行 | 栈深需求；FPGA 桥接的软件参考形态 |
-| INV-S5 | 流水线窗口 W 有界背压；通道满时 run 循环持 pin 阻塞 | 内存峰值 ≈ W×预算 + 单段证明工作集 |
-| INV-S6 | 流式证明必须用 `verify_streaming` 验证 | 两派生互斥；负向测试固化 |
-| INV-S7 | 模型输入整场永久 pin | 首段消费 + 结尾 verifier IO 零 fetch |
-| INV-S8 | prove 期间 `store.disk_reads == 0` | pin 全覆盖；测试断言固化（store 流量计数器） |
+| 编号   | 不变式                                                   | 依据                                                               |
+| ------ | -------------------------------------------------------- | ------------------------------------------------------------------ |
+| INV-S1 | pin 独立于 usage 计数；dry 条件 = usage==0 且 pin==0 | HandleLifetimeRunner 三个 dry 点统一检查                           |
+| INV-S2 | 段的 key 集合（pin 集合）在运行前即可从图结构完全确定    | 节点入边 source ∪ 出边 port 的 storage_key；proving data 永不 dry |
+| INV-S3 | 段吸收顺序 = 完成顺序 = `Proof.chunk_proofs` Vec 顺序  | 种子链正确性（方案 A）；verifier 按 Vec 序重放                     |
+| INV-S4 | 段证明在专用大栈线程执行                                 | 栈深需求；FPGA 桥接的软件参考形态                                  |
+| INV-S5 | 流水线窗口 W 有界背压；通道满时 run 循环持 pin 阻塞      | 内存峰值 ≈ W×预算 + 单段证明工作集                               |
+| INV-S6 | 流式证明必须用 `verify_streaming` 验证                 | 两派生互斥；负向测试固化                                           |
+| INV-S7 | 模型输入整场永久 pin                                     | 首段消费 + 结尾 verifier IO 零 fetch                               |
+| INV-S8 | prove 期间 `store.disk_reads == 0`                     | pin 全覆盖；测试断言固化（store 流量计数器）                       |
 
 ---
 
 ## 7 已知限制与权衡
 
-| 编号 | 限制 / 权衡 | 说明 |
-| --- | --- | --- |
-| L-1 | 一期仅垂直切分 | 单节点超预算告警放行；水平切分（二期）消除 |
-| L-2 | 生成跑两遍 | 当前 `prove_streaming` 输入需完整句子，bench 先跑 `run_elements` 参考 pass。生产化改造：`run_elements_with_runner` 暴露"仅 token 循环、跳过 heavy run"模式，heavy run 由流式证明融合执行 |
-| L-3 | 单证明线程（段间串行） | 方案 A 种子链要求段序派生；段内 sumcheck 并行不受影响。段间并行需演进为 Merkle root 派生（K 文档 §5.3），FPGA 多核加速器在段内并行 |
-| L-4 | 表证明每段一次 | 段数增多时查表证明固定开销线性增长；候选优化：表证明全局化（每表一次），见 K 文档 §6 |
-| L-5 | prove 递归的栈深根因未除 | 大段在 2MB 栈溢出，已用 64MB 专用线程规避；根因（疑似递归 Drop）待查（阶段 5） |
-| L-6 | 32k/长上下文需 SWA | 全注意力 s² 项不可行（F 文档）；滑窗注意力改造是 Llama-7B/16k 的前置条件（阶段 6 spike） |
+| 编号 | 限制 / 权衡              | 说明                                                                                                                                                                                           |
+| ---- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| L-1  | 一期仅垂直切分           | 单节点超预算告警放行；水平切分（二期）消除                                                                                                                                                     |
+| L-2  | 生成跑两遍               | 当前 `prove_streaming` 输入需完整句子，bench 先跑 `run_elements` 参考 pass。生产化改造：`run_elements_with_runner` 暴露"仅 token 循环、跳过 heavy run"模式，heavy run 由流式证明融合执行 |
+| L-3  | 单证明线程（段间串行）   | 方案 A 种子链要求段序派生；段内 sumcheck 并行不受影响。段间并行需演进为 Merkle root 派生（K 文档 §5.3），FPGA 多核加速器在段内并行                                                            |
+| L-4  | 表证明每段一次           | 段数增多时查表证明固定开销线性增长；候选优化：表证明全局化（每表一次），见 K 文档 §6                                                                                                          |
+| L-5  | prove 递归的栈深根因未除 | 大段在 2MB 栈溢出，已用 64MB 专用线程规避；根因（疑似递归 Drop）待查（阶段 5）                                                                                                                 |
+| L-6  | 32k/长上下文需 SWA       | 全注意力 s² 项不可行（F 文档）；滑窗注意力改造是 Llama-7B/16k 的前置条件（阶段 6 spike）                                                                                                      |
 
 ---
 
@@ -191,14 +192,14 @@ prove_streaming(ctx, input_tensor(完整生成句子), budget, mode, store)
 
 `test_llm_driver_streaming_prove_gpt2`（3 段：embedding 2 节点 / 主干 255 节点 / logits 2 节点）：
 
-| 指标 | 结果 |
-| --- | --- |
-| `verify_streaming`（含移位校验） | 通过 |
-| 经典 `verify` 对流式证明 | 失败（负向断言，两派生互斥） |
-| prove 期间 store 磁盘读 | `disk_reads = 0, fetch = 0` |
-| 兜底写盘 | 347 页，~10.3 MB（后台线程） |
-| 流式输出 vs `run_elements` | 逐 token 一致 |
-| Pipeline{window:2} 模式 | 通过；生成与证明重叠 |
+| 指标                               | 结果                          |
+| ---------------------------------- | ----------------------------- |
+| `verify_streaming`（含移位校验） | 通过                          |
+| 经典 `verify` 对流式证明         | 失败（负向断言，两派生互斥）  |
+| prove 期间 store 磁盘读            | `disk_reads = 0, fetch = 0` |
+| 兜底写盘                           | 347 页，~10.3 MB（后台线程）  |
+| 流式输出 vs `run_elements`       | 逐 token 一致                 |
+| Pipeline{window:2} 模式            | 通过；生成与证明重叠          |
 
 ctx=128 基准（`bench-llm --streaming`，512MB/256MB 预算）数据待补（模型缓存环境就绪后运行，CSV 列：`streaming_prove_full`、`store_*`、`prove_full_memory_peak`）。
 
@@ -206,17 +207,17 @@ ctx=128 基准（`bench-llm --streaming`，512MB/256MB 预算）数据待补（�
 
 ## 附录 A 代码索引
 
-| 机制 | 位置 |
-| --- | --- |
+| 机制                           | 位置                                                                                                                               |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
 | 预算切分（垂直模式/体积/段数） | `chunking.rs`：`LLMChunkingStrategy::{new_vertical_only, node_trace_volumes, num_chunks_for_budget, disable_horizontal_split}` |
-| 协调器（计划/检测/派发/合并） | `iop/streaming.rs`：`StreamingProver` |
-| 种子链 | `iop/streaming.rs`：`SeedChain` / `build_seed_chain`；verifier 侧 `Verifier::verify_streaming` |
-| 绑定函数（W1/W2/W3） | `iop/verifier.rs`：`bind_io_inputs_to_transcript` / `bind_proven_chunk_to_transcript` / `bind_chunk_count_to_transcript` |
-| 内存 pin | `model/mod.rs`：`HandleLifetimeRunner::{pin_keys, release_pins, is_pinned}`；dry 点三处 |
-| step tap | `model/mod.rs`：`TraceRunner::{with_step_tap, step_tap}` |
-| 编排（scope/双模式/释放） | `model/mod.rs`：`Model::run_and_prove_streaming` |
-| LLM 入口/验证 | `model/llm.rs`：`Driver::prove_streaming`、`LLMVerifierContext::{verify, verify_streaming, verify_inner}` |
-| 专用证明线程 | `iop/streaming.rs`：`PROVE_THREAD_STACK_SIZE`、`pipeline_prover_thread`、`prove_task` |
-| store 流量计数器 | `tenstore/src/metrics.rs`、`GenStore::{metrics, metrics_snapshot, reset_metrics}` |
-| bench 集成 | `zkml/src/bin/bench/llm.rs`：`--streaming --stream-budget-mb --stream-window` |
-| 验收测试 | `zkml/src/model/llm.rs`：`test_llm_driver_streaming_prove_gpt2` |
+| 协调器（计划/检测/派发/合并）  | `iop/streaming.rs`：`StreamingProver`                                                                                          |
+| 种子链                         | `iop/streaming.rs`：`SeedChain` / `build_seed_chain`；verifier 侧 `Verifier::verify_streaming`                             |
+| 绑定函数（W1/W2/W3）           | `iop/verifier.rs`：`bind_io_inputs_to_transcript` / `bind_proven_chunk_to_transcript` / `bind_chunk_count_to_transcript`   |
+| 内存 pin                       | `model/mod.rs`：`HandleLifetimeRunner::{pin_keys, release_pins, is_pinned}`；dry 点三处                                        |
+| step tap                       | `model/mod.rs`：`TraceRunner::{with_step_tap, step_tap}`                                                                       |
+| 编排（scope/双模式/释放）      | `model/mod.rs`：`Model::run_and_prove_streaming`                                                                               |
+| LLM 入口/验证                  | `model/llm.rs`：`Driver::prove_streaming`、`LLMVerifierContext::{verify, verify_streaming, verify_inner}`                    |
+| 专用证明线程                   | `iop/streaming.rs`：`PROVE_THREAD_STACK_SIZE`、`pipeline_prover_thread`、`prove_task`                                      |
+| store 流量计数器               | `tenstore/src/metrics.rs`、`GenStore::{metrics, metrics_snapshot, reset_metrics}`                                              |
+| bench 集成                     | `zkml/src/bin/bench/llm.rs`：`--streaming --stream-budget-mb --stream-window`                                                  |
+| 验收测试                       | `zkml/src/model/llm.rs`：`test_llm_driver_streaming_prove_gpt2`                                                                |

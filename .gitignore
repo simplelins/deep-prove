@@ -10,7 +10,7 @@ model.onnx
 report.json
 report.txt
 table_cache_dev_*
-target
+target*
 venv
 worker_cache/
 zkml/assets/scripts/covid/data*
